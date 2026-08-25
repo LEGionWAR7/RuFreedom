@@ -141,9 +141,12 @@ GROUPS["youtube"] = {
     "title": "YouTube",
     "icon": "i-svc-youtube",
     "accent": "#ff2d46",
-    # Проверяем не главную страницу, а API: именно через него грузятся Shorts
-    # и рекомендации, и режут чаще всего его, а не youtube.com.
-    "probe": ["youtubei.googleapis.com", "www.youtube.com"],
+    # Проверяем четыре разных куска YouTube, а не одну страницу: сама
+    # страница может открыться, а видео не пойти. i.ytimg.com -- обложки,
+    # redirector.googlevideo.com -- раздача видео, youtubei -- Shorts и лента.
+    # Группа считается пробитой, только если прошли ВСЕ четыре.
+    "probe": ["youtubei.googleapis.com", "www.youtube.com",
+              "i.ytimg.com", "redirector.googlevideo.com"],
     "domains": [
         "youtube.com", "youtu.be", "googlevideo.com", "ytimg.com",
         "ggpht.com", "youtube-nocookie.com", "youtubekids.com",

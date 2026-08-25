@@ -48,6 +48,13 @@ WATCH_PERIOD = 300.0
 WATCH_STRIKES = 2
 # не чаще одного авто-перепобора на группу в час
 WATCH_COOLDOWN = 3600.0
+# Сколько прошедших комбинаций собираем на группу, прежде чем выбирать
+# лучшую. Один -- это «первый попавшийся», а он не обязательно лучший.
+FINALISTS = 3
+# Сколько комбинаций проверяем ПОСЛЕ первой удачной, если трёх так и не
+# набралось. Без этого потолка группа, которой подходит ровно одна стратегия,
+# заставляла перебрать весь список из 285 штук — минут сорок вместо минуты.
+EXTRA_SCAN = 12
 
 
 def is_admin() -> bool:
@@ -707,6 +714,8 @@ class Api:
         # Без сетки подбор упирался в список и сдавался — а youtubei
         # берётся только ею.
         combos = autotune.all_candidates()
+        finalists: dict = {}          # {группа: [прошедшие комбинации]}
+        first_hit: dict = {}          # {группа: номер её первой удачи}
         won = {}
         open_fails = 0
 
@@ -719,6 +728,11 @@ class Api:
                 for gid in pending:
                     self._mx(gid, "wait", "не успели")
                 break
+            # у кого уже есть хоть один рабочий вариант и окно поиска вышло —
+            # хватит, лучшее выберем из того, что нашлось
+            for gid in list(pending):
+                if gid in first_hit and i - first_hit[gid] >= EXTRA_SCAN:
+                    pending.remove(gid)
             if not pending:
                 break
             self.auto["progress"] = max(0.03, i / len(combos))
@@ -768,18 +782,26 @@ class Api:
                     flaky.append(services.title(gid))
                     self._mx(gid, "wait")
                     continue
-                won[gid] = combo
-                pending.remove(gid)
+                # НЕ закрепляем сразу: копим несколько прошедших и в конце
+                # выбираем лучшего по счёту. «Первый сработавший» -- не то же
+                # самое, что «лучший»: YouTube открывался, а видео не шло.
+                finalists.setdefault(gid, []).append(combo)
+                first_hit.setdefault(gid, i)
                 self._mx(gid, "ok", combo["label"])
                 hit.append(services.title(gid))
+                if len(finalists[gid]) >= FINALISTS:
+                    pending.remove(gid)
             if hit:
                 self._logput(f"[*] {combo['label']} -> пробило: {', '.join(hit)}")
             if flaky:
                 self._logput(f"[~] {combo['label']} -> у {', '.join(flaky)} "
                              "не подтвердилось, ищу дальше.")
 
+        won = self._playoff(finalists, gen)
+
         for gid in pending:
-            self._mx(gid, "fail", "не пробило ничем")
+            if gid not in won:
+                self._mx(gid, "fail", "не пробило ничем")
 
         # 2. сохранить: своей группе — свой профиль
         for gid, combo in won.items():
@@ -837,6 +859,78 @@ class Api:
             return
         self._logput("[*] Включаю обход с подобранными настройками.")
         self.start()
+
+    def _playoff(self, finalists: dict, gen: int) -> dict:
+        """Из прошедших комбинаций выбрать для каждой группы лучшую.
+
+        Проверка «прошло/не прошло» слишком груба: две стратегии проходят
+        одинаково, а работают по-разному. Здесь каждый финалист гоняется ещё
+        раз с подсчётом КАЖДОГО рукопожатия по каждому хосту, и группа
+        достаётся тому, у кого счёт выше. При равном счёте побеждает тот, кто
+        встретился раньше — список идёт от щадящих техник к тяжёлым.
+        """
+        if not finalists:
+            return {}
+        # один и тот же кандидат часто финалист сразу у нескольких групп —
+        # гоняем его один раз на всех
+        uniq: list = []
+        for lst in finalists.values():
+            for c in lst:
+                if c not in uniq:
+                    uniq.append(c)
+        single = all(len(v) <= 1 for v in finalists.values())
+        if single:
+            return {gid: lst[0] for gid, lst in finalists.items() if lst}
+
+        best: dict = {}
+        scores: dict = {}
+        for i, combo in enumerate(uniq):
+            if gen != self._auto_gen or self._auto_stop.is_set():
+                break
+            groups = [g for g, lst in finalists.items() if combo in lst]
+            if not groups:
+                continue
+            self.auto["status"] = f"Финал: {combo['label']} ({i + 1}/{len(uniq)})"
+            for gid in groups:
+                self._mx(gid, "test")
+            got = self._score_candidate(combo, groups)
+            for gid, (ok, total) in got.items():
+                rank = (ok / total) if total else 0.0
+                if rank > scores.get(gid, -1.0):
+                    scores[gid] = rank
+                    best[gid] = combo
+
+        # кого не успели оценить — берём первого прошедшего, он честно прошёл
+        for gid, lst in finalists.items():
+            if gid not in best and lst:
+                best[gid] = lst[0]
+        for gid, combo in best.items():
+            note = f" ({scores[gid] * 100:.0f}%)" if gid in scores else ""
+            self._mx(gid, "ok", combo["label"])
+            self._logput(f"[*] {services.title(gid)}: выбрано «{combo['label']}»"
+                         f"{note} из {len(finalists.get(gid, []))} прошедших.")
+        return best
+
+    def _score_candidate(self, combo, groups) -> dict:
+        """Счёт кандидата: сколько рукопожатий из скольких прошло."""
+        prof = autotune.candidate_to_profile(combo, quic_mode=self.s["quic_mode"])
+        cfg = Config()
+        cfg.host_groups = {host: gid for gid, host in autotune.probe_targets(groups)}
+        cfg.hosts = set(cfg.host_groups)
+        cfg.profiles = {gid: prof for gid in groups}
+        eng = Engine(cfg, logger=lambda *_: None)
+        th = threading.Thread(target=eng.run, daemon=True, name="rz-score")
+        th.start()
+        eng.ready.wait(timeout=5)
+        try:
+            if not eng.running:
+                return {}
+            time.sleep(0.2)
+            return autotune.score_probes(groups, 4, rounds=3)
+        finally:
+            eng.stop()
+            th.join(timeout=4)
+            time.sleep(0.2)
 
     def _test_candidate(self, combo, groups, tries=2):
         """Прогнать одну комбинацию на проверочных хостах групп.
@@ -1040,6 +1134,19 @@ class Api:
             return True
         except Exception as exc:                     # noqa: BLE001
             self._logput(f"[!] Не открылся браузер: {exc}")
+            return False
+
+    def hide_window(self):
+        """«Скрыть всё»: окно уходит в трей, обход продолжает работать."""
+        win = globals().get("_window")
+        if win is None:
+            return False
+        try:
+            win.hide()
+            self._logput("[*] Окно свёрнуто в трей. Обход продолжает работать.")
+            return True
+        except Exception as exc:                     # noqa: BLE001
+            self._logput(f"[!] Не удалось свернуть: {exc}")
             return False
 
     def open_releases(self):
@@ -1432,6 +1539,8 @@ class Api:
 
 # ── трей ──────────────────────────────────────────────────────────────────
 _tray = None
+# окно нужно кнопке «скрыть всё»: Api сам его не создаёт
+_window = None
 
 
 def _make_tray(api: "Api", window):
@@ -1544,6 +1653,8 @@ def main() -> int:
         width=win_w, height=win_h, x=mx, y=my, min_size=(1000, 760),
         background_color="#0a0e17", hidden=splash is not None,
     )
+
+    globals()["_window"] = window
 
     # закрытие окна — прячем в трей (если он есть), а не выходим
     global _tray

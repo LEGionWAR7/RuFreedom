@@ -241,6 +241,32 @@ def test_probes(group_ids, timeout: float = 4.0, tries: int = 2) -> Dict[str, bo
     return results
 
 
+def score_probes(group_ids, timeout: float = 4.0, rounds: int = 3) -> Dict[str, tuple]:
+    """{группа: (удачных рукопожатий, всего)} — оценка вместо «да/нет».
+
+    Нужна для финала подбора. «Прошло/не прошло» слишком грубо: две стратегии
+    могут обе пройти проверку, но одна работает ровно, а вторая еле-еле. Счёт
+    по каждому хосту в отдельности эту разницу видит.
+    """
+    targets = probe_targets(group_ids)
+    if not targets:
+        return {}
+    jobs = [(gid, host) for gid, host in targets for _ in range(max(1, rounds))]
+    out: Dict[str, list] = {gid: [0, 0] for gid, _ in targets}
+    workers = max(1, min(MAX_WORKERS, len(jobs)))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [(gid, ex.submit(test_host, host, timeout)) for gid, host in jobs]
+        for gid, fut in futs:
+            try:
+                ok = fut.result()
+            except Exception:
+                ok = False
+            out[gid][1] += 1
+            if ok:
+                out[gid][0] += 1
+    return {gid: (v[0], v[1]) for gid, v in out.items()}
+
+
 def internet_alive(timeout: float = 4.0) -> bool:
     """Работает ли сеть вообще (контрольный незаблокированный хост)."""
     return test_host(CONTROL_HOST, timeout)

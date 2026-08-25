@@ -373,6 +373,21 @@
     line-height:1.55;color:#a9b6cf;white-space:pre-wrap;word-break:break-word;
     -webkit-user-select:text;user-select:text}
 
+  /* ─── журнал отдельной вкладкой ─── */
+  .logpanel{padding:0;overflow:hidden;display:flex;flex-direction:column}
+  .logpanel[hidden]{display:none}
+  .loghead{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:13px 16px;border-bottom:1px solid var(--edge)}
+  .loghead b{font-size:14px}
+  .logpanel .logbody{max-height:none;height:min(62vh,560px);transition:none}
+
+  /* ─── режим разработчика ─── */
+  .devbox{display:flex;flex-direction:column;gap:12px}
+  .devbox[hidden]{display:none}
+  .devwarn{color:var(--mut);font-size:12px;line-height:1.5;margin:0}
+  .devbox .adv{max-height:none!important;overflow:visible}
+  .devbox .advtoggle{display:none}
+
   /* ─── вкладка настроек ─── */
   .setpanel{padding:20px;display:flex;flex-direction:column;gap:14px}
   .setpanel[hidden]{display:none}
@@ -520,6 +535,8 @@
     <button class="nav" id="navTg" title="Telegram — прокси"><svg class="ic"><use href="#i-svc-telegram"/></svg></button>
     <div class="sp"></div>
     <button class="nav" id="navSet" title="Настройки и о программе"><svg class="ic"><use href="#i-gear"/></svg></button>
+    <button class="nav" id="navLog" title="Журнал"><svg class="ic"><use href="#i-list"/></svg></button>
+    <button class="nav" id="navHide" title="Скрыть всё — окно уйдёт в трей"><svg class="ic"><use href="#i-stop"/></svg></button>
   </div>
 
   <div class="main">
@@ -557,62 +574,6 @@
           <svg class="ic"><use href="#i-stop"/></svg><span>Отменить подбор</span>
         </button>
       </div>
-      <div>
-        <div class="params">
-          <div class="param"><label>Стратегия TCP</label>
-            <select id="strategy">
-              <option value="fakeddisorder">подделка внутри, обратный порядок</option>
-              <option value="fakedsplit">подделка между кусками</option>
-              <option value="fakedisorder">подделка впереди, обратный порядок</option>
-              <option value="fake">подделка впереди</option>
-              <option value="disorder">обратный порядок</option>
-              <option value="split">простой разрез</option>
-              <option value="multisplit">много кусков</option>
-              <option value="multidisorder">много кусков, обратный порядок</option>
-            </select></div>
-          <div class="param"><label>QUIC / UDP</label>
-            <select id="quic">
-              <option value="drop">drop</option>
-              <option value="fake">fake</option>
-              <option value="ipfrag">ipfrag</option>
-              <option value="off">off</option>
-            </select></div>
-          <div class="param"><label>Обман подделки</label>
-            <select id="fooling">
-              <option value="badseq">badseq — устаревший номер</option>
-              <option value="ttl">ttl — низкий TTL</option>
-              <option value="badsum">badsum — битая сумма</option>
-              <option value="ttlbadsum">ttl + badsum</option>
-              <option value="none">без подделки</option>
-            </select></div>
-        </div>
-        <button class="advtoggle" id="advToggle">
-          <svg class="ic"><use href="#i-gear"/></svg><span>Дополнительно</span>
-          <svg class="ic chev" id="advCaret"><use href="#i-chevron"/></svg>
-        </button>
-        <div class="adv" id="adv">
-          <div class="param"><label>Точка разреза</label>
-            <select id="split">
-              <option value="pos2">байт 2 — рвёт заголовок TLS</option>
-              <option value="pos1">байт 1</option>
-              <option value="pos3">байт 3</option>
-              <option value="first-char">после 1-й буквы имени</option>
-              <option value="host-start">перед именем сайта</option>
-              <option value="mid-host">середина имени</option>
-              <option value="host-end">после имени</option>
-              <option value="midsld">середина домена (youtu|be)</option>
-              <option value="sld">начало домена</option>
-              <option value="endsld">конец домена</option>
-            </select></div>
-          <div class="param"><label>TTL подделки</label>
-            <input class="numin" id="ttl" type="number" min="1" max="64" step="1" value="4"></div>
-          <div class="param"><label>Подделок подряд</label>
-            <input class="numin" id="fcount" type="number" min="1" max="8" step="1" value="2"></div>
-          <div class="param"><label>Сегментов (multi)</label>
-            <input class="numin" id="segs" type="number" min="2" max="6" step="1" value="2"></div>
-          <div class="param"><label>Перекрытие, байт</label>
-            <input class="numin" id="ovl" type="number" min="0" max="1400" step="1" value="568"></div>
-        </div>
       </div>
     </div>
 
@@ -730,6 +691,71 @@
               <span class="toggle" id="watchToggle"></span></button></div>
       </div>
 
+      <div class="setsec"><b>Режим разработчика</b>
+        <button class="allsw" id="devSw" style="padding:0;width:auto">
+          <span>ручные настройки обхода</span>
+          <span class="toggle" id="devToggle"></span></button></div>
+      <div class="devbox" id="devBox" hidden>
+        <p class="devwarn">Здесь ручки движка. Программа подбирает всё это сама —
+          менять руками стоит, только если понимаешь, что делаешь: неверная
+          комбинация просто перестанет пробивать.</p>
+        <div class="params">
+          <div class="param"><label>Стратегия TCP</label>
+            <select id="strategy">
+              <option value="fakeddisorder">подделка внутри, обратный порядок</option>
+              <option value="fakedsplit">подделка между кусками</option>
+              <option value="fakedisorder">подделка впереди, обратный порядок</option>
+              <option value="fake">подделка впереди</option>
+              <option value="disorder">обратный порядок</option>
+              <option value="split">простой разрез</option>
+              <option value="multisplit">много кусков</option>
+              <option value="multidisorder">много кусков, обратный порядок</option>
+            </select></div>
+          <div class="param"><label>QUIC / UDP</label>
+            <select id="quic">
+              <option value="drop">drop</option>
+              <option value="fake">fake</option>
+              <option value="ipfrag">ipfrag</option>
+              <option value="off">off</option>
+            </select></div>
+          <div class="param"><label>Обман подделки</label>
+            <select id="fooling">
+              <option value="badseq">badseq — устаревший номер</option>
+              <option value="ttl">ttl — низкий TTL</option>
+              <option value="badsum">badsum — битая сумма</option>
+              <option value="ttlbadsum">ttl + badsum</option>
+              <option value="none">без подделки</option>
+            </select></div>
+        </div>
+        <button class="advtoggle" id="advToggle">
+          <svg class="ic"><use href="#i-gear"/></svg><span>Дополнительно</span>
+          <svg class="ic chev" id="advCaret"><use href="#i-chevron"/></svg>
+        </button>
+        <div class="adv" id="adv">
+          <div class="param"><label>Точка разреза</label>
+            <select id="split">
+              <option value="pos2">байт 2 — рвёт заголовок TLS</option>
+              <option value="pos1">байт 1</option>
+              <option value="pos3">байт 3</option>
+              <option value="first-char">после 1-й буквы имени</option>
+              <option value="host-start">перед именем сайта</option>
+              <option value="mid-host">середина имени</option>
+              <option value="host-end">после имени</option>
+              <option value="midsld">середина домена (youtu|be)</option>
+              <option value="sld">начало домена</option>
+              <option value="endsld">конец домена</option>
+            </select></div>
+          <div class="param"><label>TTL подделки</label>
+            <input class="numin" id="ttl" type="number" min="1" max="64" step="1" value="4"></div>
+          <div class="param"><label>Подделок подряд</label>
+            <input class="numin" id="fcount" type="number" min="1" max="8" step="1" value="2"></div>
+          <div class="param"><label>Сегментов (multi)</label>
+            <input class="numin" id="segs" type="number" min="2" max="6" step="1" value="2"></div>
+          <div class="param"><label>Перекрытие, байт</label>
+            <input class="numin" id="ovl" type="number" min="0" max="1400" step="1" value="568"></div>
+        </div>
+      </div>
+
       <div class="setsec"><b>О программе</b></div>
       <div class="setlinks">
         <button class="autobtn" id="lnkRepo" style="width:auto;padding:0 16px">
@@ -746,12 +772,12 @@
       <div class="rellist" id="relList"><div class="relempty">Загружаю…</div></div>
     </div>
 
-    <div class="card logcard">
-      <button class="logh" id="logH">
+    <div class="card logpanel" id="logPanel" hidden>
+      <div class="loghead">
         <b>Журнал</b>
-        <span class="x">          <svg class="ic chev" id="logCaret"><use href="#i-chevron"/></svg></span>
-      </button>
-      <div class="logbody" id="logBody"><pre id="logPre"></pre></div>
+        <button class="setrefresh" id="logClear">очистить</button>
+      </div>
+      <div class="logbody show" id="logBody"><pre id="logPre"></pre></div>
     </div>
 
     <div class="modal" id="updModal" hidden>
@@ -877,6 +903,7 @@ async function api(name, ...args){
     {tag:"v0.2.0", name:"0.2.0", published:"2026-08-25", current:false, newer:false,
      url:"#", notes:"Первый релиз."}]}; }
   if (name==="open_url"){ return true; }
+  if (name==="hide_window"){ return true; }
   if (name==="stop_autotune"){ demo.auto.running=false;
     demo.auto.status="Остановлено"; return true; }
   if (name==="telegram_stop"){ demo.tg_searching=false;
@@ -965,7 +992,8 @@ const el = {
   proxyNote:$("proxyNote"), proxyTxt:$("proxyTxt"),
   footVer:$("footVer"), updBtn:$("updBtn"), updLbl:$("updLbl"),
   setPanel:$("setPanel"), setVer:$("setVer"), setAuthor:$("setAuthor"),
-  relList:$("relList"), navSet:$("navSet"),
+  relList:$("relList"), navSet:$("navSet"), navLog:$("navLog"),
+  logPanel:$("logPanel"), devBox:$("devBox"), devToggle:$("devToggle"),
   confNote:$("confNote"), confTxt:$("confTxt"),
   updModal:$("updModal"), updTitle:$("updTitle"), updSub:$("updSub"),
   updNote:$("updNote"), updBar:$("updBar"), updFill:$("updFill"),
@@ -974,7 +1002,7 @@ const el = {
   sTime:$("sTime"), sPkts:$("sPkts"), sTraf:$("sTraf"), sHits:$("sHits"), spVal:$("spVal"),
   svc:$("svc"), allToggle:$("allToggle"),
   sumBlocked:$("sumBlocked"), sumFree:$("sumFree"), sumHard:$("sumHard"),
-  logBody:$("logBody"), logPre:$("logPre"), logCaret:$("logCaret")
+  logBody:$("logBody"), logPre:$("logPre")
 };
 
 /* полупрозрачная подложка под значок из акцентного цвета группы */
@@ -1616,35 +1644,28 @@ $("advToggle").onclick = () => {
   const open = el.adv.classList.toggle("show");
   el.advCaret.classList.toggle("rot", open);
 };
-function toggleLog(){
-  const open = el.logBody.classList.toggle("show");
-  el.logCaret.classList.toggle("rot", open);
-  // Высота едет 0.22 с. Крутить вниз СРАЗУ бесполезно: коробка ещё нулевая,
-  // и журнал открывался с обрезанной строкой посередине. Ждём конца роста.
-  if (open) logToBottom();
-}
-el.logBody.addEventListener("transitionend", e => {
-  if (e.propertyName === "max-height") logToBottom();
-});
-$("logH").onclick = toggleLog;
+// Журнал теперь живёт на своей вкладке и всегда раскрыт: сворачивать его
+// внутри отдельной вкладки незачем.
 // состояние опроса объявляем ДО обработчиков: showTab зовёт loop(),
 // а обращение к `let` до инициализации — ошибка ещё до первого клика
 let loopId = null, inFlight = false;
 
 function showTab(which){
-  const panels = {tg: el.tgPanel, set: el.setPanel};
+  const panels = {tg: el.tgPanel, set: el.setPanel, log: el.logPanel};
   const shown = panels[which] || null;
-  el.tgPanel.hidden = which !== "tg";
-  el.setPanel.hidden = which !== "set";
+  Object.entries(panels).forEach(([k, n]) => { n.hidden = which !== k; });
   // на отдельной вкладке прячем всё, что к ней отношения не имеет
+  const own = new Set(Object.values(panels));
   document.querySelectorAll(".main > *").forEach(n=>{
-    if (n === el.tgPanel || n === el.setPanel) return;
+    if (own.has(n)) return;
     n.style.display = shown ? "none" : "";
   });
   el.navTg.classList.toggle("on", which === "tg");
   el.navSet.classList.toggle("on", which === "set");
+  el.navLog.classList.toggle("on", which === "log");
   $("navHome").classList.toggle("on", !shown);
   if (which === "set") loadReleases();
+  if (which === "log") logToBottom();
 }
 el.updBtn.onclick = () => api("open_releases");
 el.updGo.onclick = () => {
@@ -1664,6 +1685,14 @@ el.brToggle.onclick = () => {
 el.brOpen.onclick = () => { if(!el.brOpen.disabled) Promise.resolve(api("bridge_open")).finally(loop); };
 
 el.navSet.onclick = () => showTab("set");
+el.navLog.onclick = () => showTab("log");
+$("navHide").onclick = () => api("hide_window");
+$("logClear").onclick = () => { el.logPre.textContent = ""; };
+el.devToggle.parentElement.onclick = () => {
+  const on = el.devBox.hidden;
+  el.devBox.hidden = !on;
+  el.devToggle.classList.toggle("on", on);
+};
 $("lnkRepo").onclick = () => api("open_url", ABOUT.repo);
 $("lnkRel").onclick  = () => api("open_url", ABOUT.releases);
 $("lnkIss").onclick  = () => api("open_url", ABOUT.issues);
