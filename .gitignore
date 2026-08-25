@@ -1,0 +1,27 @@
+# Сборка
+build/
+dist/
+*.spec.bak
+
+# Личное: состояние конкретного компьютера, а не проект.
+# В settings.json видно, какие сервисы у человека заблокированы и что
+# подобралось под его сеть — в общий репозиторий этому не место.
+config/settings.json
+config/history.json
+*-settings.json
+
+# Отодвинутая при обновлении прошлая версия
+*.old.exe
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Разное
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
