@@ -220,11 +220,21 @@ def system_proxy_endpoint() -> Optional[Tuple[str, int]]:
         return None
 
 
-def scan(host: str = "127.0.0.1") -> Dict:
+def scan(host: str = "127.0.0.1", stop=None) -> Dict:
     """Полный поиск. Возвращает найденное, проверенное и объяснение.
 
     {"best": {...} | None, "all": [...], "clients": [...], "scanned": N}
+
+    `stop` — threading.Event: если он взведён, проверка прекращается на
+    ближайшем порту. Полное рукопожатие к каждому живому порту идёт секунды,
+    и человек должен иметь возможность не ждать их все.
     """
+    def stopped():
+        return bool(stop is not None and stop.is_set())
+
+    if stopped():
+        return {"best": None, "all": [], "clients": running_clients(),
+                "scanned": 0, "alive": 0, "stopped": True}
     bridge = find_ws_bridge(host)
     found: List[dict] = []
     if bridge:
@@ -241,6 +251,8 @@ def scan(host: str = "127.0.0.1") -> Dict:
         alive = [p for p, ok in zip(ports, ex.map(lambda p: _listening(p, host), ports)) if ok]
 
     for port in alive:
+        if stopped():
+            break
         if bridge and port == bridge["port"]:
             continue
         ok, why = probe_socks5(port, host)

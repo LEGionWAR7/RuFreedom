@@ -104,6 +104,9 @@ class Api:
         self.state = "idle"
         # поколение автоподбора: отставший воркер не должен трогать чужой запуск
         self._auto_gen = 0
+        # Отмена подбора. Отдельный флаг, а не смена поколения: смена
+        # поколения сбивает уборку за воркером, и «идёт подбор» залипло бы.
+        self._auto_stop = threading.Event()
         # сколько строк лога всего было — клиент по нему понимает, что нового
         self._log_seq = 0
         # сторож: сколько проверок подряд провалила группа и когда её последний
@@ -585,6 +588,7 @@ class Api:
                 return False
             self._auto_gen += 1
             gen = self._auto_gen
+            self._auto_stop.clear()
             # Флаг ставим ДО старта потока, иначе два быстрых клика заводят два
             # воркера. Словарь мутируем, а не пересоздаём: иначе отставший
             # воркер писал бы в осиротевший объект и флаг залипал бы в True.
@@ -601,6 +605,16 @@ class Api:
                                                  args=(gen, list(targets), by_user),
                                                  daemon=True, name="rz-auto")
             self._auto_thread.start()
+        return True
+
+    def stop_autotune(self):
+        """Прервать подбор. Уже подобранное не пропадает."""
+        with self._lock:
+            if not self.auto.get("running"):
+                return False
+        self._auto_stop.set()
+        self.auto["status"] = "Останавливаю…"
+        self._logput("[*] Подбор остановлен вручную.")
         return True
 
     def _mx(self, gid, state, label=""):
@@ -684,6 +698,12 @@ class Api:
         for i, combo in enumerate(combos):
             if gen != self._auto_gen:      # запуск отменён более новым
                 return len(won)
+            if self._auto_stop.is_set():
+                self.auto["status"] = (f"Остановлено — подобрано {len(won)}"
+                                       if won else "Остановлено")
+                for gid in pending:
+                    self._mx(gid, "wait", "не успели")
+                break
             if not pending:
                 break
             self.auto["progress"] = max(0.03, i / len(combos))
@@ -761,9 +781,14 @@ class Api:
             self.s["seg_count"] = int(best.get("segs", self.s["seg_count"]))
             self.s["seqovl"] = int(best.get("ovl", 0))
             self.auto["best"] = f"{len(won)} из {len(targets)} групп подобрано"
-            self.auto["status"] = "Готово — применено"
+            self.auto["status"] = ("Остановлено — подобранное применено"
+                                   if self._auto_stop.is_set() else "Готово — применено")
             self._logput("[*] Подобрано: " + "; ".join(
                 f"{services.title(g)} = {c['label']}" for g, c in won.items()))
+        elif self._auto_stop.is_set():
+            # человек прервал сам -- «ничего не пробило» тут было бы враньём:
+            # до большей части списка просто не дошли
+            self.auto["status"] = "Остановлено"
         else:
             self.auto["status"] = "Ничего не пробило — попробуй вручную"
             self._logput("[!] Автоподбор ничего не пробил.")
@@ -1019,43 +1044,90 @@ class Api:
                          "total": int(scan.get("total") or 0),
                          "found": len(scan.get("entries") or [])}}
 
-    def bridge_find(self):
-        """Просканировать подсети Telegram и найти живую точку входа."""
-        if self.bridge_scan["running"]:
-            return False
+    def telegram_connect(self):
+        """Подключить Telegram: одно действие вместо двух кнопок.
+
+        Кнопок было две — «найти вход» для встроенного моста и «найти прокси»
+        для уже запущенного клиента, — и человеку приходилось гадать, какая
+        из них ему нужна. Теперь порядок задан здесь: сначала пробуем
+        обойтись своими силами, и только если не вышло — смотрим, нет ли
+        чужого прокси. Обе части прерываются одной кнопкой «Отменить».
+        """
+        with self._lock:
+            if self.tg_searching or self.bridge_scan["running"]:
+                return False
+            self.tg_searching = True
         self._bridge_stop.clear()
-        self.bridge_scan.update({"running": True, "net": "", "step": 0, "total": 0})
-        threading.Thread(target=self._bridge_scan_worker, daemon=True,
+        threading.Thread(target=self._connect_worker, daemon=True,
                          name="rz-tgfind").start()
         return True
 
-    def bridge_find_stop(self):
+    def telegram_stop(self):
+        """Прервать поиск на любом его шаге."""
         self._bridge_stop.set()
         return True
 
-    def _bridge_scan_worker(self):
+    def _find_entries(self) -> list:
+        """Шаг 1: живая точка входа для собственного моста."""
         def progress(net, i, total):
             self.bridge_scan.update({"net": net, "step": i, "total": total})
 
+        self.bridge_scan.update({"running": True, "net": "", "step": 0, "total": 0})
         try:
-            self._logput("[*] Ищу точку входа в Telegram по его подсетям…")
+            self._logput("[*] Ищу точку входа для встроенного моста…")
             found = tgbridge.find_entries(progress=progress,
                                           stop=self._bridge_stop, limit=3)
             self.bridge_scan["entries"] = found
             self.s["tg_entries"] = found
             settings_store.save(self.s)
-            if found:
-                # адреса в журнал тоже не пишем — тот же довод
-                self._logput(f"[*] Найдено точек входа: {len(found)}. Поднимаю мост.")
-                self.bridge_start()
-            else:
-                self._logput("[!] Ни одной живой точки входа. У этого провайдера "
-                             "закрыты все адреса Telegram — встроенный мост "
-                             "подключиться не может.")
-        except Exception as exc:  # noqa: BLE001
-            self._logput(f"[!] Поиск точки входа: {exc}")
+            return found
         finally:
             self.bridge_scan["running"] = False
+
+    def _scan_proxies(self) -> dict:
+        """Шаг 2: уже запущенный на этом компьютере прокси-клиент."""
+        self._logput("[*] Смотрю, нет ли уже запущенного прокси…")
+        res = tgproxy.scan(stop=self._bridge_stop)
+        self.tg_scan = res
+        self.tg_proxy = res.get("best")
+        return res
+
+    def _connect_worker(self):
+        try:
+            found = self._find_entries()
+            if found:
+                # адреса в журнал не пишем — чтобы их нельзя было вписать руками
+                self._logput(f"[*] Найдено точек входа: {len(found)}. Поднимаю мост.")
+                self.bridge_start()
+                return
+            if self._bridge_stop.is_set():
+                self._logput("[*] Поиск остановлен.")
+                return
+
+            self._logput("[!] Своих точек входа нет — у провайдера закрыты все "
+                         "адреса Telegram.")
+            res = self._scan_proxies()
+            if self._bridge_stop.is_set() and not res.get("best"):
+                self._logput("[*] Поиск остановлен.")
+                return
+            best = res.get("best")
+            if best:
+                self._logput(f"[*] Найден {best['title']} — {best['note']}. "
+                             f"Нажми «Настроить Telegram».")
+            else:
+                self._logput(f"[!] Рабочего прокси нет. Проверено портов: "
+                             f"{res.get('scanned', 0)}, откликнулось "
+                             f"{res.get('alive', 0)}.")
+                if res.get("clients"):
+                    self._logput("    Запущены: " + ", ".join(res["clients"])
+                                 + " — включи в них локальный прокси "
+                                   "(SOCKS5 на 127.0.0.1).")
+        except Exception as exc:  # noqa: BLE001
+            self._logput(f"[!] Подключение Telegram: {exc}")
+        finally:
+            self.bridge_scan["running"] = False
+            with self._lock:
+                self.tg_searching = False
 
     def bridge_start(self):
         entries = self.bridge_scan.get("entries") or []
@@ -1098,41 +1170,6 @@ class Api:
                          f"127.0.0.1, порт {tgbridge.DEFAULT_PORT}.")
             return False
 
-    # -- Telegram: поиск прокси -------------------------------------------
-    def telegram_scan(self):
-        """Обойти локальные порты и найти прокси, через который Telegram живёт."""
-        with self._lock:
-            if self.tg_searching:
-                return False
-            self.tg_searching = True
-        threading.Thread(target=self._tg_worker, daemon=True, name="rz-tg").start()
-        return True
-
-    def _tg_worker(self):
-        try:
-            self._logput("[*] Ищу локальный прокси для Telegram…")
-            res = tgproxy.scan()
-            self.tg_scan = res
-            self.tg_proxy = res.get("best")
-            if res.get("best"):
-                b = res["best"]
-                self._logput(f"[*] Найден {b['title']} — {b['note']}.")
-            else:
-                self._logput(f"[!] Рабочего прокси нет. Проверено портов: "
-                             f"{res.get('scanned', 0)}, откликнулось {res.get('alive', 0)}.")
-                if res.get("clients"):
-                    self._logput("    Запущены: " + ", ".join(res["clients"])
-                                 + " — включи в них режим локального прокси "
-                                   "(SOCKS5 на 127.0.0.1).")
-                else:
-                    self._logput("    Ни одного прокси-клиента не запущено. "
-                                 "Для Telegram подойдёт tg-ws-proxy или NekoBox.")
-        except Exception as exc:  # noqa: BLE001
-            self._logput(f"[!] Поиск прокси: {exc}")
-        finally:
-            with self._lock:
-                self.tg_searching = False
-
     def telegram_open(self, port=None):
         """Открыть ссылку tg://, чтобы Telegram сам предложил добавить прокси."""
         found = None
@@ -1167,11 +1204,11 @@ class Api:
 
     # старые имена — на случай, если где-то остался прежний вызов
     def find_telegram_proxy(self):
-        return self.telegram_scan()
+        return self.telegram_connect()
 
     def open_telegram_proxy(self):
         if not self.tg_scan:
-            return self.telegram_scan()
+            return self.telegram_connect()
         return self.telegram_open()
 
     def retune_group(self, gid):
@@ -1292,6 +1329,7 @@ class Api:
                 return
             self._auto_gen += 1
             gen = self._auto_gen
+            self._auto_stop.clear()
             self.auto.clear()
             self.auto.update({
                 "running": True, "progress": 0.02, "eta": 0, "best": None,

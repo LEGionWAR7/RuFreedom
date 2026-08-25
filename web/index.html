@@ -507,6 +507,9 @@
           <span class="spin"></span>
           <span id="autoLbl">Подобрать автоматически</span>
         </button>
+        <button class="autobtn" id="autoStop" hidden>
+          <svg class="ic"><use href="#i-stop"/></svg><span>Отменить подбор</span>
+        </button>
       </div>
       <div>
         <div class="params">
@@ -634,11 +637,6 @@
           <b>Telegram через прокси</b>
           <small>Закрыт по IP — нужен прокси или мост</small>
         </div>
-        <button class="autobtn" id="tgScan" style="width:auto;padding:0 16px">
-          <svg class="ic"><use href="#i-shield"/></svg>
-          <span class="spin"></span>
-          <span id="tgScanLbl">Найти прокси</span>
-        </button>
       </div>
       <div class="tgbridge" id="tgBridge">
         <div class="brhead">
@@ -648,7 +646,10 @@
         <div class="brbtns">
           <button class="autobtn" id="brFind" style="width:auto;padding:0 16px">
             <svg class="ic"><use href="#i-shield"/></svg>
-            <span class="spin"></span><span id="brFindLbl">Найти вход</span>
+            <span class="spin"></span><span id="brFindLbl">Подключить Telegram</span>
+          </button>
+          <button class="autobtn" id="brStop" style="width:auto;padding:0 16px" hidden>
+            <svg class="ic"><use href="#i-stop"/></svg><span>Отменить</span>
           </button>
           <button class="autobtn" id="brToggle" style="width:auto;padding:0 16px">
             <svg class="ic"><use href="#i-power"/></svg><span id="brToggleLbl">Включить мост</span>
@@ -707,6 +708,15 @@
 "use strict";
 /* ─── мост к Python (pywebview). Без него — демо-режим для браузера ─── */
 const HAS = () => !!(window.pywebview && window.pywebview.api);
+function demoProxies(){
+  demo.tg_searching = false;
+  demo.tg_scan = {scanned:72, alive:2, clients:["NekoBox"],
+    best:{host:"127.0.0.1",port:2080,kind:"socks5"},
+    all:[{host:"127.0.0.1",port:2080,kind:"socks5",
+          title:"SOCKS5 127.0.0.1:2080", note:"доходит до Telegram"},
+         {host:"127.0.0.1",port:8080,kind:"",broken:true,
+          title:"127.0.0.1:8080", note:"это не SOCKS5"}]};
+}
 const DEMO_UPDATE = {current:"", latest:"", newer:false, required:false,
   url:"https://github.com/LEGionWAR7/RuFreedom/releases", notes:"", error:"",
   checking:false, asset:"", size:0, sha256:"", later:false,
@@ -773,14 +783,26 @@ async function api(name, ...args){
   if (name==="retune_group"){ fakeAuto([args[0]]); return true; }
   if (name==="run_autotune"){ fakeAuto(null); return true; }
   if (name==="run_diagnose"){ fakeDiag(); return true; }
-  if (name==="telegram_scan"){ demo.tg_searching=true;
+  if (name==="__demo_never"){ return true; }
+  if (name==="stop_autotune"){ demo.auto.running=false;
+    demo.auto.status="Остановлено"; return true; }
+  if (name==="telegram_stop"){ demo.tg_searching=false;
+    demo.bridge.scan.running=false; return true; }
+  if (name==="telegram_connect"){
+    // шаг 1: свой мост. Ничего не нашли -> шаг 2: чужой прокси
+    demo.bridge.scan.running=true; demo.bridge.scan.total=12; demo.bridge.scan.step=0;
+    let i=0; const id=setInterval(()=>{ demo.bridge.scan.step=++i;
+      if(i>=12){ clearInterval(id); demo.bridge.scan.running=false;
+        demo.tg_searching=true; setTimeout(()=>demoProxies(), 1500); } }, 200);
+    return true; }
+  if (name==="__unused_telegram_scan"){ demo.tg_searching=true;
     setTimeout(()=>{ demo.tg_searching=false; demo.tg_scan={scanned:72,alive:2,
       clients:["NekoBox"], best:{host:"127.0.0.1",port:2080,kind:"socks5"},
       all:[{host:"127.0.0.1",port:2080,kind:"socks5",title:"SOCKS5 127.0.0.1:2080",note:"доходит до Telegram"},
            {host:"127.0.0.1",port:8080,kind:"",broken:true,title:"127.0.0.1:8080",note:"это не SOCKS5"}]}; }, 1800);
     return true; }
   if (name==="telegram_open"){ return true; }
-  if (name==="bridge_find"){ demo.bridge.scan.running=true; demo.bridge.scan.total=12;
+  if (name==="__unused_bridge_find"){ demo.bridge.scan.running=true; demo.bridge.scan.total=12;
     let i=0; const id=setInterval(()=>{ demo.bridge.scan.step=++i;
       if(i>=12){ clearInterval(id); demo.bridge.scan.running=false;
         demo.bridge.scan.found=1; demo.bridge.running=true; } }, 260);
@@ -842,8 +864,9 @@ const el = {
   autoCard:$("autoCard"), autoSt:$("autoSt"), autoBest:$("autoBest"), autoBar:$("autoBar"),
   autoMx:$("autoMx"), diagBtn:$("diagBtn"), diagLbl:$("diagLbl"),
   tgPanel:$("tgPanel"), tgList:$("tgList"), tgHint:$("tgHint"),
-  tgScan:$("tgScan"), tgScanLbl:$("tgScanLbl"), navTg:$("navTg"),
+  navTg:$("navTg"),
   brState:$("brState"), brFind:$("brFind"), brFindLbl:$("brFindLbl"),
+  brStop:$("brStop"), autoStop:$("autoStop"),
   brToggle:$("brToggle"), brToggleLbl:$("brToggleLbl"), brOpen:$("brOpen"),
   brInfo:$("brInfo"), bootSw:$("bootSw"), bootToggle:$("bootToggle"),
   proxyNote:$("proxyNote"), proxyTxt:$("proxyTxt"),
@@ -1016,10 +1039,15 @@ function paintBridge(st){
   const on = !!b.running;
   el.brState.classList.toggle("on", on);
   setText(el.brState, on ? "работает" : "выключен");
-  el.brFind.disabled = !!sc.running;
-  el.brFind.classList.toggle("busy", !!sc.running);
-  setText(el.brFindLbl, sc.running
-    ? (sc.total ? `Ищу… ${sc.step}/${sc.total}` : "Ищу…") : "Найти вход");
+  // Поиск идёт в два шага: сперва свой мост, потом чужой прокси. Занято --
+  // пока не кончились оба, поэтому смотрим на общий признак поиска.
+  const busy = !!sc.running || !!st.tg_searching;
+  el.brFind.disabled = busy;
+  el.brFind.classList.toggle("busy", busy);
+  setText(el.brFindLbl, !busy ? "Подключить Telegram"
+    : (sc.running ? (sc.total ? `Ищу вход… ${sc.step}/${sc.total}` : "Ищу вход…")
+                  : "Перебираю порты…"));
+  if (el.brStop.hidden === busy) el.brStop.hidden = !busy;
   setText(el.brToggleLbl, on ? "Выключить мост" : "Включить мост");
   el.brToggle.disabled = !on && !(sc.entries||[]).length;
   el.brOpen.disabled = !on;
@@ -1028,7 +1056,9 @@ function paintBridge(st){
   if (sc.running)
     info = sc.total ? `Проверяю подсети Telegram: ${sc.step} из ${sc.total}. Это несколько минут — открытый адрес ещё не значит рабочий, каждый проверяю настоящим соединением.`
                     : "Проверяю подсети Telegram…";
-  else if (!sc.found) info = "Вход не найден. Нажми «Найти вход».";
+  else if (st.tg_searching)
+    info = "Своего входа нет — смотрю, нет ли уже запущенного прокси.";
+  else if (!sc.found) info = "Нажми «Подключить Telegram».";
   else if (on){
     const s = b.stats || {};
     info = "Мост работает. В Telegram укажи SOCKS5, 127.0.0.1, порт " + b.port
@@ -1042,10 +1072,6 @@ function paintBridge(st){
 
 function paintTelegram(st){
   paintBridge(st);
-  el.tgScan.disabled = !!st.tg_searching;
-  el.tgScan.classList.toggle("busy", !!st.tg_searching);
-  setText(el.tgScanLbl, st.tg_searching ? "Перебираю порты…" : "Найти прокси");
-
   const sc = st.tg_scan;
   const entries = (sc && sc.all) || [];
   const sig = entries.map(f=>f.port+f.kind+(f.broken?"x":"")).join(",");
@@ -1140,6 +1166,8 @@ function renderState(st){
   el.voiceSw.disabled = lock;
   el.autobtn.disabled = lock || !!st.busy;
   el.autobtn.classList.toggle("busy", !!st.auto.running);
+  const tuning = !!st.auto.running;
+  if (el.autoStop.hidden === tuning) el.autoStop.hidden = !tuning;
   setText(el.autoLbl, st.auto.running ? "Подбираю…" : "Подобрать автоматически");
 
   el.diagBtn.disabled = !!st.busy;
@@ -1344,6 +1372,7 @@ el.power.onclick = () => {
   Promise.resolve(api("toggle")).finally(loop);
 };
 el.autobtn.onclick = () => { if (!el.autobtn.disabled) Promise.resolve(api("run_autotune")).finally(loop); };
+el.autoStop.onclick = () => Promise.resolve(api("stop_autotune")).finally(loop);
 $("elevate").onclick = () => api("elevate");
 
 el.strategy.onchange = () => api("set","strategy", el.strategy.value);
@@ -1415,9 +1444,7 @@ function showTab(which){
   });
   el.navTg.classList.toggle("on", tg);
   $("navHome").classList.toggle("on", !tg);
-  if (tg && !lastTgScan){ lastTgScan = true; Promise.resolve(api("telegram_scan")).finally(loop); }
 }
-let lastTgScan = false;
 el.updBtn.onclick = () => api("open_releases");
 el.updGo.onclick = () => {
   if (el.updGo.disabled) return;
@@ -1427,8 +1454,8 @@ el.updGo.onclick = () => {
 el.updLater.onclick = () => Promise.resolve(api("dismiss_update")).finally(loop);
 el.navTg.onclick = () => showTab("tg");
 $("navHome").onclick = () => showTab("home");
-el.tgScan.onclick = () => { if(!el.tgScan.disabled) Promise.resolve(api("telegram_scan")).finally(loop); };
-el.brFind.onclick = () => { if(!el.brFind.disabled) Promise.resolve(api("bridge_find")).finally(loop); };
+el.brFind.onclick = () => { if(!el.brFind.disabled) Promise.resolve(api("telegram_connect")).finally(loop); };
+el.brStop.onclick = () => Promise.resolve(api("telegram_stop")).finally(loop);
 el.brToggle.onclick = () => {
   const on = el.brState.classList.contains("on");
   Promise.resolve(api(on ? "bridge_stop" : "bridge_start")).finally(loop);
