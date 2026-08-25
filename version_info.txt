@@ -4,7 +4,7 @@
 # признаком зловреда.
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(0, 2, 0, 0), prodvers=(0, 2, 0, 0),
+    filevers=(0, 3, 0, 0), prodvers=(0, 3, 0, 0),
     mask=0x3f, flags=0x0, OS=0x40004, fileType=0x1, subtype=0x0, date=(0, 0)
   ),
   kids=[
@@ -13,12 +13,12 @@ VSVersionInfo(
         '040904B0',
         [StringStruct('CompanyName', 'RuFreedom'),
          StringStruct('FileDescription', 'RuFreedom - obhod blokirovok (DPI bypass)'),
-         StringStruct('FileVersion', '0.2.0'),
+         StringStruct('FileVersion', '0.3.0'),
          StringStruct('InternalName', 'RuFreedom'),
          StringStruct('LegalCopyright', 'Free software, MIT-style. WinDivert (LGPL) included.'),
          StringStruct('OriginalFilename', 'RuFreedom.exe'),
          StringStruct('ProductName', 'RuFreedom'),
-         StringStruct('ProductVersion', '0.2.0'),
+         StringStruct('ProductVersion', '0.3.0'),
          StringStruct('Comments', 'Local DPI bypass utility. Does not collect or send user data.')]
       )
     ]),
