@@ -1192,7 +1192,7 @@ function renderState(st){
   paintTelegram(st);
 
   const a = st.auto;
-  el.autoCard.classList.toggle("show", !!(a.running || a.best));
+  el.autoCard.classList.toggle("show", !!(a.running || a.best || a.status));
   const eta = a.running && a.eta ? "  ·  ~" + fmtDur(a.eta) + " осталось" : "";
   setText(el.autoSt, (a.status || (a.best ? "Готово" : "")) + eta);
   setText(el.autoBest, a.best || "");

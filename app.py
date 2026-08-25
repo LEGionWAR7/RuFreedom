@@ -575,17 +575,27 @@ class Api:
         return services.domains_for(self._enabled_groups())
 
     # -- автоподбор --------------------------------------------------------
+    def _auto_refuse(self, text: str) -> bool:
+        """Отказ запустить подбор — с причиной НА ЭКРАНЕ.
+
+        Раньше причина уходила только в журнал, а он свёрнут. Со стороны это
+        выглядело как «нажал, и ничего не произошло».
+        """
+        self._logput("[!] " + text)
+        self.auto.update({"running": False, "progress": 0.0, "eta": 0,
+                          "status": text, "best": None, "matrix": []})
+        return False
+
     def run_autotune(self, only=None, by_user=True):
         with self._lock:
             if self.auto["running"] or self.diag_running:
-                self._logput("[!] Дождись окончания текущей проверки.")
-                return False
+                return self._auto_refuse("Дождись окончания текущей проверки.")
             if self.state != "idle":
-                self._logput("[!] Сначала выключи обход, потом подбирай.")
-                return False
+                return self._auto_refuse("Сначала выключи обход, потом подбирай.")
             if not is_admin():
-                self._logput("[!] Автоподбор требует прав администратора.")
-                return False
+                return self._auto_refuse(
+                    "Нужны права администратора: закрой программу и запусти "
+                    "правой кнопкой -> «Запуск от имени администратора».")
             self._auto_gen += 1
             gen = self._auto_gen
             self._auto_stop.clear()
@@ -718,9 +728,14 @@ class Api:
                 # проблема с драйвером, а не со стратегией: две минуты молчаливых
                 # неудач тут никому не помогут
                 if open_fails >= 2:
-                    self.auto["status"] = "Не удалось открыть драйвер WinDivert"
-                    self._logput("[!] WinDivert не открывается — подбор прерван. "
-                                 "Запусти от администратора и проверь антивирус.")
+                    why = getattr(self, "_last_open_error", "") or "причина неизвестна"
+                    self.auto["status"] = "Драйвер WinDivert не открывается"
+                    self._logput(f"[!] WinDivert не открывается ({why}) — подбор "
+                                 f"прерван.")
+                    self._logput("    Обычно причина одна из трёх: программа "
+                                 "запущена не от администратора; драйвер выгрыз "
+                                 "антивирус; уже работает другая программа обхода "
+                                 "(zapret, GoodbyeDPI) и держит драйвер.")
                     return len(won)
                 continue
             open_fails = 0
@@ -837,6 +852,9 @@ class Api:
         opened = eng.running
         try:
             if not opened:
+                # Причину знает только движок. Без неё «драйвер не открылся»
+                # ничего не говорит человеку, который сидит далеко.
+                self._last_open_error = eng.error or "причина неизвестна"
                 return {}, False
             time.sleep(0.2)
             return autotune.test_probes(groups, 4, tries), True
