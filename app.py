@@ -916,6 +916,10 @@ class Api:
         prof = autotune.candidate_to_profile(combo, quic_mode=self.s["quic_mode"])
         cfg = Config()
         cfg.host_groups = {host: gid for gid, host in autotune.probe_targets(groups)}
+        for gid, hosts in self._probe_extra().items():
+            if gid in groups:
+                for h in hosts:
+                    cfg.host_groups[h] = gid
         cfg.hosts = set(cfg.host_groups)
         cfg.profiles = {gid: prof for gid in groups}
         eng = Engine(cfg, logger=lambda *_: None)
@@ -926,7 +930,8 @@ class Api:
             if not eng.running:
                 return {}
             time.sleep(0.2)
-            return autotune.score_probes(groups, 4, rounds=3)
+            return autotune.score_probes(groups, 4, rounds=3,
+                                         extra=self._probe_extra())
         finally:
             eng.stop()
             th.join(timeout=4)
@@ -1096,12 +1101,31 @@ class Api:
             self._logput(f"[!] Установка не удалась: {err}")
             return
 
-        # Новая копия уже запущена. Гасим драйвер и уходим, иначе две копии
-        # какое-то время держали бы WinDivert одновременно.
+        # Новая копия уже запущена. Старое окно надо убрать НЕМЕДЛЕННО: пока
+        # оно на экране, человек видит прежний интерфейс и решает, что
+        # обновление ничего не сделало. Именно так и выглядела жалоба
+        # «пофиксила только полная переустановка».
         try:
-            self.shutdown()
+            win = globals().get("_window")
+            if win is not None:
+                win.hide()
         except Exception:                            # noqa: BLE001
             pass
+
+        # Гасим драйвер — но не ждём этого вечно. Если движок или мост
+        # подвиснут на остановке, старый процесс останется жить рядом с новым
+        # и будет держать WinDivert. Даём четыре секунды и уходим в любом случае.
+        done = threading.Event()
+
+        def _quit():
+            try:
+                self.shutdown()
+            except Exception:                        # noqa: BLE001
+                pass
+            done.set()
+
+        threading.Thread(target=_quit, daemon=True, name="rz-quit").start()
+        done.wait(4.0)
         os._exit(0)
 
     def dismiss_update(self):
@@ -1435,6 +1459,10 @@ class Api:
             except Exception as exc:  # noqa: BLE001
                 self._logput(f"[!] Проверка античита: {exc}")
             try:
+                self._harvest_hosts()
+            except Exception as exc:  # noqa: BLE001
+                self._logput(f"[!] Сбор имён: {exc}")
+            try:
                 self._conflict_tick()
             except Exception as exc:  # noqa: BLE001
                 self._logput(f"[!] Проверка соседей: {exc}")
@@ -1445,6 +1473,27 @@ class Api:
                 self._watch_tick()
             except Exception as exc:  # noqa: BLE001
                 self._logput(f"[!] Сторож: {exc}")
+
+    def _harvest_hosts(self):
+        """Забрать у движка имена серверов, которые он видел вживую."""
+        eng = self.engine
+        seen = getattr(eng, "seen_hosts", None) if eng else None
+        if not seen:
+            return
+        box = self.s.setdefault("seen_hosts", {})
+        changed = False
+        for gid, hosts in seen.items():
+            keep = list(hosts)[-4:]        # четырёх свежих хватает
+            if box.get(gid) != keep:
+                box[gid] = keep
+                changed = True
+        if changed:
+            settings_store.save(self.s)
+
+    def _probe_extra(self) -> dict:
+        """Запомненные имена для оценки финалистов."""
+        box = self.s.get("seen_hosts") or {}
+        return {gid: list(hosts)[:2] for gid, hosts in box.items() if hosts}
 
     def _conflict_tick(self):
         """Кто ещё занял драйвер или увёл трафик в туннель."""

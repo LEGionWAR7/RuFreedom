@@ -241,7 +241,8 @@ def test_probes(group_ids, timeout: float = 4.0, tries: int = 2) -> Dict[str, bo
     return results
 
 
-def score_probes(group_ids, timeout: float = 4.0, rounds: int = 3) -> Dict[str, tuple]:
+def score_probes(group_ids, timeout: float = 4.0, rounds: int = 3,
+                 extra: Optional[Dict[str, list]] = None) -> Dict[str, tuple]:
     """{группа: (удачных рукопожатий, всего)} — оценка вместо «да/нет».
 
     Нужна для финала подбора. «Прошло/не прошло» слишком грубо: две стратегии
@@ -249,6 +250,11 @@ def score_probes(group_ids, timeout: float = 4.0, rounds: int = 3) -> Dict[str, 
     по каждому хосту в отдельности эту разницу видит.
     """
     targets = probe_targets(group_ids)
+    # Живые имена, замеченные в трафике. Именно они решают, будет ли грузиться
+    # видео: постоянные проверочные хосты до раздающих серверов не достают.
+    for gid, hosts in (extra or {}).items():
+        if gid in group_ids:
+            targets += [(gid, h) for h in hosts]
     if not targets:
         return {}
     jobs = [(gid, host) for gid, host in targets for _ in range(max(1, rounds))]

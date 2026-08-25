@@ -62,6 +62,11 @@ class Engine:
     def __init__(self, config, logger: Optional[Callable[[str], None]] = None) -> None:
         self.cfg = config
         self.hostlist = HostList()
+        # Имена, которые реально прошли через нас. Подбор проверяется на
+        # заранее заданных хостах, а видео YouTube раздают серверы с именами
+        # вида rr5---sn-q4fl6nzy.googlevideo.com — их не угадать, но их
+        # можно запомнить и потом мерить именно на них.
+        self.seen_hosts: Dict[str, "OrderedDict"] = {}
         self._log = logger or print
         self._w = None
         self._running = False
@@ -288,6 +293,18 @@ class Engine:
             self._last_log.clear()
         self._log(text)
 
+    def _remember_host(self, host: str, group: str) -> None:
+        """Запомнить живое имя сервера группы (не больше 8 на группу)."""
+        if not host or not group:
+            return
+        box = self.seen_hosts.setdefault(group, OrderedDict())
+        if host in box:
+            box.move_to_end(host)
+            return
+        box[host] = True
+        while len(box) > 8:
+            box.popitem(last=False)
+
     def _remember_ip(self, addr: Optional[str], group: str) -> None:
         if not addr or not group:
             return
@@ -313,6 +330,7 @@ class Engine:
 
         prof = self.cfg.profile_for(group)
         self._remember_ip(pkt.dst_addr, group)
+        self._remember_host(host, group)
 
         positions = self._positions(start, end, len(payload), prof, host)
         if not positions:
@@ -524,13 +542,28 @@ class Engine:
             self._handle_quic(pkt, payload)
             return
 
-        # не-QUIC UDP: голосовые каналы Discord
+        # Не-QUIC UDP: голос и демонстрация экрана Discord. Диапазон широкий
+        # (50000-65535), поэтому в него попадает и игровой трафик. Отделяем по
+        # АДРЕСУ: он известен из TCP-соединений к тем же серверам. Чужой адрес
+        # пропускаем нетронутым — трогать игры мы не имеем права.
+        known = self._ip_group.get(pkt.dst_addr or "")
         for lo, hi, gid in self._udp_spans:
-            if lo <= dport <= hi:
-                self._handle_voice(pkt, payload, gid)
-                return
+            if not (lo <= dport <= hi):
+                continue
+            if known is not None and known != gid:
+                break                      # это чужой сервер, не наш
+            if known is None and self._wide_span(lo, hi):
+                break                      # широкий диапазон, адрес незнаком:
+                                           # по одному порту решать нельзя
+            self._handle_voice(pkt, payload, gid)
+            return
 
         self._w.send(pkt)
+
+    @staticmethod
+    def _wide_span(lo: int, hi: int) -> bool:
+        """Диапазон настолько широк, что по одному порту решать нельзя."""
+        return hi - lo > 2000
 
     def _handle_quic(self, pkt, payload: bytes) -> None:
         group = self._ip_group.get(pkt.dst_addr or "")
