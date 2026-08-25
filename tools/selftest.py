@@ -20,7 +20,8 @@ import sys
 import threading
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# скрипт лежит в tools/, а пакет dpi -- на уровень выше
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Консоль Windows по умолчанию не в UTF-8, и русский вывод превращается
 # в кашу. Просим Python писать в UTF-8 независимо от кодовой страницы.
