@@ -36,10 +36,20 @@ REPO = "RuFreedom"
 # ЕДИНСТВЕННОЕ место, где живёт номер версии. Паспорт exe
 # (version_info.txt) собирается из него при сборке, руками его
 # править не надо -- иначе номера разъедутся.
-VERSION = "0.3.1"
+VERSION = "0.4.0"
 
 API_URL = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
 RELEASES_URL = f"https://github.com/{OWNER}/{REPO}/releases"
+REPO_URL = f"https://github.com/{OWNER}/{REPO}"
+ISSUES_URL = f"https://github.com/{OWNER}/{REPO}/issues"
+LIST_URL = f"https://api.github.com/repos/{OWNER}/{REPO}/releases?per_page=20"
+AUTHOR = OWNER
+AUTHOR_URL = f"https://github.com/{OWNER}"
+
+# Через сколько дней после выхода новой версии откладывать её больше нельзя.
+# Смысл в том, чтобы не выдёргивать человека посреди дела прямо в день
+# релиза, но и не оставлять его на старой сборке навсегда.
+GRACE_DAYS = 3
 
 # Откуда вообще позволено качать. Всё остальное — отказ.
 ALLOWED_HOSTS = ("github.com", "api.github.com", "objects.githubusercontent.com",
@@ -113,7 +123,8 @@ def check(timeout: float = _TIMEOUT) -> Dict:
     """
     out = {"current": VERSION, "latest": "", "newer": False, "required": False,
            "url": RELEASES_URL, "notes": "", "error": "",
-           "asset": "", "size": 0, "sha256": ""}
+           "asset": "", "size": 0, "sha256": "",
+           "published": "", "age_days": 0, "grace_left": GRACE_DAYS}
     try:
         data = _api(API_URL, timeout)
     except urllib.error.HTTPError as exc:
@@ -133,10 +144,19 @@ def check(timeout: float = _TIMEOUT) -> Dict:
     out["url"] = data.get("html_url") or RELEASES_URL
     out["notes"] = notes[:600]
 
+    out["published"] = (data.get("published_at") or "").strip()
+    age = age_days(out["published"])
+    out["age_days"] = age
+    out["grace_left"] = max(0, GRACE_DAYS - age) if age is not None else GRACE_DAYS
+
     if out["newer"]:
         floor = min_version(notes)
-        # без явной планки требованием считается любой новый релиз
-        out["required"] = _cmp(VERSION, floor) < 0 if floor else True
+        if floor:
+            out["required"] = _cmp(VERSION, floor) < 0
+        else:
+            # Свежий релиз можно отложить, застарелый — уже нет: три дня
+            # прошло, значит человек просто не обновляется.
+            out["required"] = age is None or age >= GRACE_DAYS
 
     asset = pick_asset(data)
     if asset:
@@ -284,6 +304,54 @@ def install_and_restart(new_exe: str) -> str:
     except Exception as exc:                       # noqa: BLE001
         return f"новая версия установлена, но не запустилась: {exc}"
     return ""
+
+
+def age_days(published: str):
+    """Сколько суток прошло с публикации. None, если дату не разобрать."""
+    if not published:
+        return None
+    try:
+        from datetime import datetime, timezone
+        t = datetime.fromisoformat(published.replace("Z", "+00:00"))
+        return max(0, int((datetime.now(timezone.utc) - t).total_seconds() // 86400))
+    except Exception:                              # noqa: BLE001
+        return None
+
+
+def releases(limit: int = 20, timeout: float = _TIMEOUT) -> Dict:
+    """Журнал обновлений: все релизы с описаниями.
+
+    Отдельный запрос, а не побочный результат проверки: список нужен только
+    когда человек открыл настройки, и дёргать его при каждом запуске незачем.
+    """
+    out = {"items": [], "error": ""}
+    try:
+        data = _api(LIST_URL, timeout)
+    except urllib.error.HTTPError as exc:
+        out["error"] = "релизов пока нет" if exc.code == 404 else f"GitHub: {exc.code}"
+        return out
+    except Exception as exc:                       # noqa: BLE001
+        out["error"] = str(exc) or "нет связи с GitHub"
+        return out
+    if not isinstance(data, list):
+        out["error"] = "неожиданный ответ GitHub"
+        return out
+    for rel in data[:limit]:
+        tag = (rel.get("tag_name") or "").strip()
+        if not tag:
+            continue
+        out["items"].append({
+            "tag": tag,
+            "name": (rel.get("name") or tag).strip(),
+            "published": (rel.get("published_at") or "")[:10],
+            "notes": (rel.get("body") or "").strip(),
+            "url": rel.get("html_url") or RELEASES_URL,
+            "current": _cmp(tag, VERSION) == 0,
+            "newer": is_newer(tag),
+        })
+    if not out["items"]:
+        out["error"] = "релизов пока нет"
+    return out
 
 
 def asset_urls(data: Dict) -> List[str]:

@@ -369,8 +369,54 @@
     background:var(--card2);border-top:1px solid transparent}
   .logbody.show{max-height:min(38vh,340px);border-top-color:var(--edge)}
   .logbody pre{margin:0;padding:12px 16px;font-family:Consolas,monospace;font-size:11.5px;
+    white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;
     line-height:1.55;color:#a9b6cf;white-space:pre-wrap;word-break:break-word;
     -webkit-user-select:text;user-select:text}
+
+  /* ─── вкладка настроек ─── */
+  .setpanel{padding:20px;display:flex;flex-direction:column;gap:14px}
+  .setpanel[hidden]{display:none}
+  .sethead{display:flex;align-items:center;gap:14px}
+  .setlogo{width:44px;height:44px;flex:none;object-fit:contain;
+    filter:drop-shadow(0 4px 14px rgba(254,198,2,.28))}
+  .sethead b{display:block;font-size:17px;font-weight:800}
+  .sethead small{display:block;color:var(--mut);font-size:12.5px;margin-top:2px}
+  .setsec{display:flex;align-items:baseline;justify-content:space-between;gap:10px;
+    border-top:1px solid var(--edge);padding-top:12px;margin-top:2px}
+  .setsec b{font-size:13.5px}
+  .setrefresh{background:none;border:0;color:var(--mut);font:inherit;font-size:11.5px;
+    cursor:pointer;text-decoration:underline dotted}
+  .setrefresh:hover{color:#fff}
+  .setlinks{display:flex;gap:10px;flex-wrap:wrap}
+  .setauthor{color:var(--mut);font-size:12.5px}
+  .setauthor b{color:#cfe0ff}
+  .rellist{display:flex;flex-direction:column;gap:8px}
+  .relempty{color:var(--mut);font-size:12.5px}
+  .relitem{border:1px solid var(--edge);border-radius:13px;overflow:hidden;
+    background:var(--tile)}
+  .relhead{width:100%;display:flex;align-items:center;gap:10px;padding:10px 14px;
+    background:none;border:0;color:inherit;font:inherit;cursor:pointer;text-align:left}
+  .relhead:hover{background:#131c2e}
+  .reltag{font-weight:800;font-size:13px}
+  .reldate{color:var(--mut2);font-size:11.5px}
+  .relbadge{font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:999px;
+    background:rgba(79,140,255,.18);color:#cfe0ff}
+  .relbadge.now{background:rgba(52,211,153,.16);color:#6ee7b7}
+  .relhead .sp{flex:1}
+  .relbody{max-height:0;overflow:hidden;transition:max-height .2s var(--e)}
+  .relbody.show{max-height:400px;overflow:auto}
+  .relbody pre{margin:0;padding:0 14px 12px;color:var(--mut);font-size:12px;
+    line-height:1.55;white-space:pre-wrap;word-break:break-word;font-family:inherit}
+
+  /* ─── плашка соседей ─── */
+  .conflict{display:flex;align-items:flex-start;gap:10px;padding:11px 14px;
+    border-radius:13px;font-size:12.5px;line-height:1.5;
+    background:linear-gradient(180deg,rgba(245,158,11,.12),transparent),var(--card);
+    border:1px solid #3a3222;color:#ffe6b8}
+  .conflict[hidden]{display:none}
+  .conflict.hard{background:linear-gradient(180deg,rgba(248,96,122,.14),transparent),var(--card);
+    border-color:#3a2230;color:#ffd7de}
+  .conflict .ic{width:16px;height:16px;flex:none;margin-top:1px}
 
   /* ─── окно обновления ─── */
   .modal{position:fixed;inset:0;z-index:60;display:grid;place-items:center;
@@ -473,7 +519,7 @@
     <button class="nav on" id="navHome" title="Главная"><svg class="ic"><use href="#i-home"/></svg></button>
     <button class="nav" id="navTg" title="Telegram — прокси"><svg class="ic"><use href="#i-svc-telegram"/></svg></button>
     <div class="sp"></div>
-    <button class="nav" id="navLog" title="Журнал"><svg class="ic"><use href="#i-list"/></svg></button>
+    <button class="nav" id="navSet" title="Настройки и о программе"><svg class="ic"><use href="#i-gear"/></svg></button>
   </div>
 
   <div class="main">
@@ -566,20 +612,6 @@
             <input class="numin" id="segs" type="number" min="2" max="6" step="1" value="2"></div>
           <div class="param"><label>Перекрытие, байт</label>
             <input class="numin" id="ovl" type="number" min="0" max="1400" step="1" value="568"></div>
-          <div class="param"><label>Голос Discord (UDP)</label>
-            <button class="allsw" id="voiceSw" style="padding:0"><span>обходить</span>
-              <span class="toggle" id="voiceToggle"></span></button></div>
-          <div class="param"><label>Игры с античитом</label>
-            <button class="allsw" id="acSw" style="padding:0"
-              title="Только если игра не стартует: гасит обход целиком">
-              <span>гасить обход целиком</span>
-              <span class="toggle" id="acToggle"></span></button></div>
-          <div class="param"><label>Запуск с Windows</label>
-            <button class="allsw" id="bootSw" style="padding:0"><span>включать сам</span>
-              <span class="toggle" id="bootToggle"></span></button></div>
-          <div class="param"><label>Сторож</label>
-            <button class="allsw" id="watchSw" style="padding:0"><span>перепобирать сам</span>
-              <span class="toggle" id="watchToggle"></span></button></div>
         </div>
       </div>
     </div>
@@ -601,6 +633,10 @@
         <div class="top"><span class="k">Скорость обработки</span><span class="val" id="spVal">0 Б/с</span></div>
         <div class="sparkbox"><canvas class="spark" id="spark"></canvas></div>
       </div>
+    </div>
+
+    <div class="conflict" id="confNote" hidden>
+      <svg class="ic"><use href="#i-shield"/></svg><span id="confTxt"></span>
     </div>
 
     <div class="note" id="acNote" hidden>
@@ -666,6 +702,50 @@
       <div class="tghint" id="tgHint"></div>
     </div>
 
+
+    <div class="card setpanel" id="setPanel" hidden>
+      <div class="sethead">
+        <img class="setlogo" src="../assets/icon.png" alt="">
+        <div>
+          <b>RuFreedom <span id="setVer"></span></b>
+          <small>Обход блокировок без VPN</small>
+        </div>
+      </div>
+
+      <div class="setsec"><b>Настройки</b></div>
+      <div class="params" id="setToggles">
+          <div class="param"><label>Голос Discord (UDP)</label>
+            <button class="allsw" id="voiceSw" style="padding:0"><span>обходить</span>
+              <span class="toggle" id="voiceToggle"></span></button></div>
+          <div class="param"><label>Игры с античитом</label>
+            <button class="allsw" id="acSw" style="padding:0"
+              title="Только если игра не стартует: гасит обход целиком">
+              <span>гасить обход целиком</span>
+              <span class="toggle" id="acToggle"></span></button></div>
+          <div class="param"><label>Запуск с Windows</label>
+            <button class="allsw" id="bootSw" style="padding:0"><span>включать сам</span>
+              <span class="toggle" id="bootToggle"></span></button></div>
+          <div class="param"><label>Сторож</label>
+            <button class="allsw" id="watchSw" style="padding:0"><span>перепобирать сам</span>
+              <span class="toggle" id="watchToggle"></span></button></div>
+      </div>
+
+      <div class="setsec"><b>О программе</b></div>
+      <div class="setlinks">
+        <button class="autobtn" id="lnkRepo" style="width:auto;padding:0 16px">
+          <svg class="ic"><use href="#i-list"/></svg><span>Репозиторий</span></button>
+        <button class="autobtn" id="lnkRel" style="width:auto;padding:0 16px">
+          <svg class="ic"><use href="#i-chevron"/></svg><span>Все версии</span></button>
+        <button class="autobtn" id="lnkIss" style="width:auto;padding:0 16px">
+          <svg class="ic"><use href="#i-shield"/></svg><span>Сообщить о проблеме</span></button>
+      </div>
+      <div class="setauthor">Автор: <b id="setAuthor">—</b></div>
+
+      <div class="setsec"><b>Журнал обновлений</b>
+        <button class="setrefresh" id="relRefresh">обновить список</button></div>
+      <div class="rellist" id="relList"><div class="relempty">Загружаю…</div></div>
+    </div>
+
     <div class="card logcard">
       <button class="logh" id="logH">
         <b>Журнал</b>
@@ -718,6 +798,7 @@ function demoProxies(){
           title:"127.0.0.1:8080", note:"это не SOCKS5"}]};
 }
 const DEMO_UPDATE = {current:"", latest:"", newer:false, required:false,
+  published:"", age_days:0, grace_left:3,
   url:"https://github.com/LEGionWAR7/RuFreedom/releases", notes:"", error:"",
   checking:false, asset:"", size:0, sha256:"", later:false,
   job:{running:false, stage:"", done:0, total:0, error:""}};
@@ -736,7 +817,7 @@ const demo = {
   all_traffic:false, voice_fake:true, watchdog:true,
   diag_running:false, proxy:"", anticheat:[], ac_paused:false, tg_proxy:null,
   tg_searching:false, busy:"", tg_scan:null,
-  autostart:false, update: DEMO_UPDATE,
+  autostart:false, update: DEMO_UPDATE, conflicts:[], conflict_note:"",
   bridge:{running:false,port:1081,stats:{},
           scan:{running:false,step:0,total:0,found:0}},
   pause_on_anticheat:false,
@@ -783,7 +864,19 @@ async function api(name, ...args){
   if (name==="retune_group"){ fakeAuto([args[0]]); return true; }
   if (name==="run_autotune"){ fakeAuto(null); return true; }
   if (name==="run_diagnose"){ fakeDiag(); return true; }
-  if (name==="__demo_never"){ return true; }
+  if (name==="about"){ return {version:"0.3.1", author:"LEGionWAR7",
+    author_url:"https://github.com/LEGionWAR7",
+    repo:"https://github.com/LEGionWAR7/RuFreedom",
+    releases:"https://github.com/LEGionWAR7/RuFreedom/releases",
+    issues:"https://github.com/LEGionWAR7/RuFreedom/issues"}; }
+  if (name==="get_releases"){ return {error:"", items:[
+    {tag:"v0.3.1", name:"0.3.1", published:"2026-08-25", current:true, newer:false,
+     url:"#", notes:"Подбор объясняет, почему не начался."},
+    {tag:"v0.3.0", name:"0.3.0", published:"2026-08-25", current:false, newer:false,
+     url:"#", notes:"Одна кнопка для Telegram вместо двух. Отмена подбора."},
+    {tag:"v0.2.0", name:"0.2.0", published:"2026-08-25", current:false, newer:false,
+     url:"#", notes:"Первый релиз."}]}; }
+  if (name==="open_url"){ return true; }
   if (name==="stop_autotune"){ demo.auto.running=false;
     demo.auto.status="Остановлено"; return true; }
   if (name==="telegram_stop"){ demo.tg_searching=false;
@@ -871,6 +964,9 @@ const el = {
   brInfo:$("brInfo"), bootSw:$("bootSw"), bootToggle:$("bootToggle"),
   proxyNote:$("proxyNote"), proxyTxt:$("proxyTxt"),
   footVer:$("footVer"), updBtn:$("updBtn"), updLbl:$("updLbl"),
+  setPanel:$("setPanel"), setVer:$("setVer"), setAuthor:$("setAuthor"),
+  relList:$("relList"), navSet:$("navSet"),
+  confNote:$("confNote"), confTxt:$("confTxt"),
   updModal:$("updModal"), updTitle:$("updTitle"), updSub:$("updSub"),
   updNote:$("updNote"), updBar:$("updBar"), updFill:$("updFill"),
   updErr:$("updErr"), updGo:$("updGo"), updGoLbl:$("updGoLbl"), updLater:$("updLater"),
@@ -1203,6 +1299,18 @@ function renderState(st){
 }
 
 /* частый путь: только цифры и график */
+function renderConflicts(st){
+  const txt = st.conflict_note || "";
+  const show = !!txt;
+  if (el.confNote.hidden === show) el.confNote.hidden = !show;
+  if (!show) return;
+  setText(el.confTxt, txt);
+  // мешающий сосед — красным, туннель — жёлтым: разница в том, надо ли
+  // что-то делать прямо сейчас
+  const hard = (st.conflicts||[]).some(c => c.level === "blocker");
+  el.confNote.classList.toggle("hard", hard);
+}
+
 function renderUpdate(st){
   const u = st.update || {}, j = u.job || {};
   // Окно висит, пока идёт установка: прерывать её на середине нельзя.
@@ -1211,9 +1319,11 @@ function renderUpdate(st){
   if (!show) return;
 
   setText(el.updTitle, u.required ? "Требуется обновление" : "Доступно обновление");
+  const left = Number(u.grace_left || 0);
   setText(el.updSub, u.required
     ? `Версия ${u.current} больше не поддерживается. Новая: ${u.latest}`
-    : `У тебя ${u.current}, вышла ${u.latest}`);
+    : `У тебя ${u.current}, вышла ${u.latest}` +
+      (left > 0 ? ` · отложить можно ещё ${left} ${left === 1 ? "день" : "дн."}` : ""));
   setText(el.updNote, (u.notes || "").trim()
     || "Программа скачает новую версию и перезапустится сама.");
 
@@ -1278,7 +1388,7 @@ function render(st){
   const sig = [st.diag_running,st.busy,st.tg_searching,tgSig,st.proxy,
                (st.anticheat||[]).join(),st.ac_paused,
                JSON.stringify(st.tg_proxy||null),
-               st.pause_on_anticheat,st.autostart,
+               st.pause_on_anticheat,st.autostart,st.conflict_note,
                // проверка обновлений заканчивается ПОЗЖЕ первой отрисовки,
                // поэтому её результат обязан входить в подпись -- иначе
                // плашка «есть новая версия» не появится никогда
@@ -1290,12 +1400,91 @@ function render(st){
   if (sig!==lastSig){ lastSig = sig; renderState(st); }
   renderTick(st);
   renderUpdate(st);
+  renderConflicts(st);
   syncLog(st);
 }
 
+/* ─── о программе и журнал обновлений ─── */
+let ABOUT = {repo:"", releases:"", issues:"", author:"", author_url:"", version:""};
+let relLoaded = false;
+
+async function loadAbout(){
+  const a = await api("about");
+  if (!a) return;
+  ABOUT = a;
+  setText(el.setVer, a.version || "");
+  setText(el.setAuthor, a.author || "—");
+}
+
+async function loadReleases(force){
+  if (relLoaded && !force) return;
+  relLoaded = true;
+  const r = await api("get_releases");
+  const box = el.relList;
+  box.textContent = "";
+  if (!r || r.error || !(r.items||[]).length){
+    const d = document.createElement("div");
+    d.className = "relempty";
+    d.textContent = (r && r.error) ? "Список недоступен: " + r.error : "Версий пока нет.";
+    box.appendChild(d);
+    return;
+  }
+  r.items.forEach(it => box.appendChild(relCard(it)));
+}
+
+function relCard(it){
+  const wrap = document.createElement("div");
+  wrap.className = "relitem";
+
+  const head = document.createElement("button");
+  head.className = "relhead";
+  head.type = "button";
+
+  const tag = document.createElement("span");
+  tag.className = "reltag"; tag.textContent = it.tag;
+  const date = document.createElement("span");
+  date.className = "reldate"; date.textContent = it.published || "";
+  const sp = document.createElement("span"); sp.className = "sp";
+  head.append(tag, date, sp);
+
+  if (it.current || it.newer){
+    const b = document.createElement("span");
+    b.className = "relbadge" + (it.current ? " now" : "");
+    b.textContent = it.current ? "у тебя" : "новее";
+    head.appendChild(b);
+  }
+  const chev = document.createElementNS("http://www.w3.org/2000/svg","svg");
+  chev.setAttribute("class","ic chev");
+  const use = document.createElementNS("http://www.w3.org/2000/svg","use");
+  use.setAttribute("href","#i-chevron");
+  chev.appendChild(use); head.appendChild(chev);
+
+  const body = document.createElement("div");
+  body.className = "relbody";
+  const pre = document.createElement("pre");
+  pre.textContent = it.notes || "Без описания.";
+  body.appendChild(pre);
+
+  head.onclick = () => {
+    const open = body.classList.toggle("show");
+    chev.classList.toggle("rot", open);
+  };
+  wrap.append(head, body);
+  return wrap;
+}
+
 /* ─── журнал: тянем только новые строки ─── */
+function logAtBottom(){
+  const b = el.logBody;
+  return b.scrollHeight - b.scrollTop - b.clientHeight < 24;
+}
+function logToBottom(){
+  if (el.logBody.classList.contains("show"))
+    el.logBody.scrollTop = el.logBody.scrollHeight;
+}
 async function syncLog(st){
   if (st.log_seq === logSeq) return;
+  const stick = logAtBottom();          // запоминаем ДО дописывания
   const r = await api("get_log", logSeq);
   if (!r) return;
   if (r.reset) el.logPre.textContent = r.lines.join("\n");
@@ -1304,7 +1493,10 @@ async function syncLog(st){
   logSeq = r.seq;
   if (el.logPre.textContent.length > 120000)
     el.logPre.textContent = el.logPre.textContent.slice(-60000);
-  if (el.logBody.classList.contains("show")) el.logBody.scrollTop = el.logBody.scrollHeight;
+  // Уматывать вниз можно, ТОЛЬКО если человек и так внизу. Иначе журнал
+  // каждую секунду выдёргивал его обратно, и прочитать что-то выше было
+  // невозможно — со стороны это выглядит как «прокрутка работает через раз».
+  if (stick) logToBottom();
 }
 
 /* ─── график скорости ─── */
@@ -1427,23 +1619,32 @@ $("advToggle").onclick = () => {
 function toggleLog(){
   const open = el.logBody.classList.toggle("show");
   el.logCaret.classList.toggle("rot", open);
-  if (open) el.logBody.scrollTop = el.logBody.scrollHeight;
+  // Высота едет 0.22 с. Крутить вниз СРАЗУ бесполезно: коробка ещё нулевая,
+  // и журнал открывался с обрезанной строкой посередине. Ждём конца роста.
+  if (open) logToBottom();
 }
+el.logBody.addEventListener("transitionend", e => {
+  if (e.propertyName === "max-height") logToBottom();
+});
 $("logH").onclick = toggleLog;
 // состояние опроса объявляем ДО обработчиков: showTab зовёт loop(),
 // а обращение к `let` до инициализации — ошибка ещё до первого клика
 let loopId = null, inFlight = false;
 
 function showTab(which){
-  const tg = which === "tg";
-  el.tgPanel.hidden = !tg;
-  // на вкладке Telegram прячем всё, что к нему отношения не имеет
+  const panels = {tg: el.tgPanel, set: el.setPanel};
+  const shown = panels[which] || null;
+  el.tgPanel.hidden = which !== "tg";
+  el.setPanel.hidden = which !== "set";
+  // на отдельной вкладке прячем всё, что к ней отношения не имеет
   document.querySelectorAll(".main > *").forEach(n=>{
-    if (n === el.tgPanel) return;
-    n.style.display = tg ? "none" : "";
+    if (n === el.tgPanel || n === el.setPanel) return;
+    n.style.display = shown ? "none" : "";
   });
-  el.navTg.classList.toggle("on", tg);
-  $("navHome").classList.toggle("on", !tg);
+  el.navTg.classList.toggle("on", which === "tg");
+  el.navSet.classList.toggle("on", which === "set");
+  $("navHome").classList.toggle("on", !shown);
+  if (which === "set") loadReleases();
 }
 el.updBtn.onclick = () => api("open_releases");
 el.updGo.onclick = () => {
@@ -1462,7 +1663,11 @@ el.brToggle.onclick = () => {
 };
 el.brOpen.onclick = () => { if(!el.brOpen.disabled) Promise.resolve(api("bridge_open")).finally(loop); };
 
-$("navLog").onclick = toggleLog;
+el.navSet.onclick = () => showTab("set");
+$("lnkRepo").onclick = () => api("open_url", ABOUT.repo);
+$("lnkRel").onclick  = () => api("open_url", ABOUT.releases);
+$("lnkIss").onclick  = () => api("open_url", ABOUT.issues);
+$("relRefresh").onclick = () => loadReleases(true);
 
 /* ─── цикл опроса ─── */
 async function loop(){
@@ -1491,6 +1696,7 @@ document.addEventListener("visibilitychange", retime);
 function startLoop(){                          // идемпотентно: два интервала не заведём
   if (loopId) return;
   loop();
+  loadAbout();                                 // автор и ссылки — один раз
   loopId = setInterval(loop, loopDelay());
 }
 window.addEventListener("pywebviewready", startLoop);

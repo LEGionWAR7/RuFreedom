@@ -26,7 +26,7 @@ import webview
 
 from dpi import (anticheat, autotune, config as config_mod, diagnose, services,
                  settings_store, tgbridge, tgproxy)
-from dpi import autostart, update
+from dpi import autostart, conflicts, update
 from dpi.config import Config, Profile
 from dpi.engine import Engine
 
@@ -120,6 +120,9 @@ class Api:
         self.updjob: dict = {"running": False, "stage": "", "done": 0,
                              "total": 0, "error": ""}
         self.upd_later = False        # человек нажал «Позже» в этом запуске
+        # Кто ещё лезет в тот же трафик. Обновляется сторожем раз в пять
+        # секунд — процессы приходят и уходят, разовой проверки мало.
+        self.conflicts: list = []
         self._watch_strikes: dict = {}
         self._watch_last: dict = {}
         self._watch_at = time.monotonic()
@@ -329,6 +332,8 @@ class Api:
             "autostart": self.autostart_state(),
             "update": {**self.upd, "job": dict(self.updjob),
                        "later": self.upd_later},
+            "conflicts": list(self.conflicts),
+            "conflict_note": conflicts.summary(self.conflicts),
             "busy": self.busy(),
             "ac_paused": self.ac_paused,
             "pause_on_anticheat": self.s["pause_on_anticheat"],
@@ -1010,6 +1015,33 @@ class Api:
         self.upd_later = True
         return True
 
+    def get_releases(self):
+        """Журнал обновлений — список релизов с описаниями."""
+        try:
+            return update.releases()
+        except Exception as exc:                     # noqa: BLE001
+            return {"items": [], "error": str(exc)}
+
+    def about(self):
+        """Кто написал и куда смотреть."""
+        return {"version": update.VERSION, "author": update.AUTHOR,
+                "author_url": update.AUTHOR_URL, "repo": update.REPO_URL,
+                "releases": update.RELEASES_URL, "issues": update.ISSUES_URL}
+
+    def open_url(self, url):
+        """Открыть ссылку в браузере. Только свои — чужие не открываем."""
+        allowed = (update.REPO_URL, update.RELEASES_URL,
+                   update.ISSUES_URL, update.AUTHOR_URL)
+        if not (url in allowed or url.startswith(update.REPO_URL + "/")):
+            self._logput("[!] Эта ссылка не из репозитория — не открываю.")
+            return False
+        try:
+            webbrowser.open(url)
+            return True
+        except Exception as exc:                     # noqa: BLE001
+            self._logput(f"[!] Не открылся браузер: {exc}")
+            return False
+
     def open_releases(self):
         """Открыть страницу релизов в браузере. Скачивает человек, не мы."""
         url = self.upd.get("url") or update.RELEASES_URL
@@ -1295,6 +1327,10 @@ class Api:
                 self._anticheat_tick()
             except Exception as exc:  # noqa: BLE001
                 self._logput(f"[!] Проверка античита: {exc}")
+            try:
+                self._conflict_tick()
+            except Exception as exc:  # noqa: BLE001
+                self._logput(f"[!] Проверка соседей: {exc}")
             if time.monotonic() - self._watch_at < WATCH_PERIOD:
                 continue
             self._watch_at = time.monotonic()
@@ -1302,6 +1338,21 @@ class Api:
                 self._watch_tick()
             except Exception as exc:  # noqa: BLE001
                 self._logput(f"[!] Сторож: {exc}")
+
+    def _conflict_tick(self):
+        """Кто ещё занял драйвер или увёл трафик в туннель."""
+        now = conflicts.found()
+        was = {c["title"] for c in self.conflicts}
+        self.conflicts = now
+        for c in now:
+            if c["title"] in was:
+                continue                       # про каждого говорим один раз
+            if c["level"] == "blocker":
+                self._logput(f"[!] Запущен {c['title']} — он держит тот же драйвер "
+                             f"WinDivert. Пока он работает, обход не включится.")
+            else:
+                self._logput(f"[*] Запущен {c['title']}: трафик идёт через туннель, "
+                             f"обход ему уже не нужен.")
 
     def _watch_tick(self):
         with self._lock:
