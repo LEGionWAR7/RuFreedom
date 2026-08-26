@@ -63,6 +63,12 @@ WATCH_COOLDOWN = 3600.0
 # (переупорядоченные сегменты сервер иногда ждёт). Срезать до 2 с было бы
 # соблазнительно, но ценой изредка забракованной рабочей стратегии -- а
 # подтверждения она уже не увидит, потому что до него не дойдёт.
+# Сколько живут имена, подсмотренные в трафике. Имена раздающих серверов
+# YouTube и голосовых серверов Discord выдаются под сессию, и через несколько
+# часов они уже ничьи. Разрешаться по DNS они при этом продолжают
+# (*.googlevideo.com), поэтому единственная надёжная проверка — возраст.
+SEEN_HOSTS_TTL = 6 * 3600
+
 SCAN_TIMEOUT = 3.0
 # Там, где решается судьба стратегии (подтверждение и финал), спешить нельзя:
 # лишняя секунда стоит дёшево, ошибочно забракованный победитель — дорого.
@@ -650,6 +656,14 @@ class Api:
         with self._lock:
             if self.auto["running"] or self.diag_running:
                 return self._auto_refuse("Дождись окончания текущей проверки.")
+            # Поиск Telegram открывает сотни соединений разом (подсети сканируются
+            # пулом на 160 потоков). Одновременно с подбором это гарантированно
+            # портит замеры: рукопожатия начинают упираться в таймаут, и
+            # кандидаты валятся не потому, что плохи.
+            if self.tg_searching or self.bridge_scan.get("running"):
+                return self._auto_refuse(
+                    "Идёт поиск прокси для Telegram — он забивает сеть, и замеры "
+                    "подбора будут врать. Дождись его или отмени.")
             if self.state != "idle":
                 return self._auto_refuse("Сначала выключи обход, потом подбирай.")
             if not is_admin():
@@ -838,9 +852,19 @@ class Api:
             self.auto["status"] = f"Перепроверяю: {combo['label']}"
             for gid in maybe:
                 self._mx(gid, "test")
+            # Живые имена ПОДКЛЮЧАЕМ к движку (обход должен их накрыть), но
+            # решать «прошло/не прошло» по ним НЕЛЬЗЯ. Имена вида
+            # rr4---sn-4g5edndl.googlevideo.com выдаются под сессию: через
+            # час-другой к ним уже не подключиться никакой стратегией. А раз
+            # проверка требует, чтобы прошли ВСЕ хосты, одно такое имя
+            # заваливает подряд всех кандидатов — ровно это и случилось на
+            # чужой машине: перебрали весь список, «не подтвердилось» у всех,
+            # включая ту стратегию, которая десятью минутами раньше дала 100%.
+            # Их место — в подсчёте очков финала, где они РАНЖИРУЮТ, а не
+            # отсеивают.
             ok2, opened2 = self._test_candidate(combo, maybe, tries=3,
                                                 timeout=CHECK_TIMEOUT,
-                                                extra=self._probe_extra())
+                                                cover=self._probe_extra())
 
             hit, flaky = [], []
             for gid in maybe:
@@ -901,8 +925,21 @@ class Api:
             # до большей части списка просто не дошли
             self.auto["status"] = "Остановлено"
         else:
-            self.auto["status"] = "Ничего не пробило — попробуй вручную"
-            self._logput("[!] Автоподбор ничего не пробил.")
+            kept = [g for g in targets if self.s["profiles"].get(g)]
+            if kept:
+                # Важно сказать вслух: прежний выбор НЕ стёрт. Иначе «ничего не
+                # пробило» читается как «всё пропало», хотя работавшая
+                # настройка осталась на месте.
+                self.auto["status"] = ("Ничего нового не нашлось — прежние "
+                                       "настройки остались")
+                self._logput("[*] Ничего нового не пробило. Прежний выбор "
+                             "оставлен без изменений: " + "; ".join(
+                                 f"{services.title(g)} = "
+                                 f"{Profile.from_dict(self.s['profiles'][g]).label()}"
+                                 for g in kept))
+            else:
+                self.auto["status"] = "Ничего не пробило — попробуй вручную"
+                self._logput("[!] Автоподбор ничего не пробил.")
 
         self.s["auto_tuned"] = True
         settings_store.save(self.s)
@@ -1033,7 +1070,7 @@ class Api:
             time.sleep(0.1)
 
     def _test_candidate(self, combo, groups, tries=2, timeout=CHECK_TIMEOUT,
-                        extra=None):
+                        cover=None):
         """Прогнать одну комбинацию на проверочных хостах групп.
 
         Возвращает ({группа: пробило}, открылся ли драйвер). Второе важно
@@ -1043,10 +1080,12 @@ class Api:
         prof = autotune.candidate_to_profile(combo, quic_mode=self.s["quic_mode"])
         cfg = Config()
         cfg.host_groups = {host: gid for gid, host in autotune.probe_targets(groups)}
-        for gid, hosts in (extra or {}).items():
+        # `cover` — только чтобы движок накрыл обходом и эти имена. В зачёт
+        # они не идут: см. пояснение на месте вызова.
+        for gid, hosts in (cover or {}).items():
             if gid in groups:
                 for h in hosts:
-                    cfg.host_groups[h] = gid
+                    cfg.host_groups.setdefault(h, gid)
         cfg.hosts = set(cfg.host_groups)
         cfg.profiles = {gid: prof for gid in groups}
         eng = Engine(cfg, logger=lambda *_: None)
@@ -1061,7 +1100,7 @@ class Api:
                 self._last_open_error = eng.error or "причина неизвестна"
                 return {}, False
             time.sleep(0.1)
-            return autotune.test_probes(groups, timeout, tries, extra=extra), True
+            return autotune.test_probes(groups, timeout, tries), True
         finally:
             eng.stop()
             th.join(timeout=4)
@@ -1324,6 +1363,11 @@ class Api:
         with self._lock:
             if self.tg_searching or self.bridge_scan["running"]:
                 return False
+            if self.auto.get("running"):
+                self._logput("[!] Сейчас идёт подбор обхода. Поиск прокси забьёт "
+                             "сеть и собьёт его замеры — дождись или останови "
+                             "подбор.")
+                return False
             self.tg_searching = True
         self._bridge_stop.clear()
         threading.Thread(target=self._connect_worker, daemon=True,
@@ -1480,11 +1524,20 @@ class Api:
         if not found or found.get("broken"):
             self._logput("[!] Сначала найди прокси — нечего открывать.")
             return False
+        kind = (found.get("kind") or "").upper() or "SOCKS5"
+        manual = (f"    Вручную: {kind}, {found['host']}, порт {found['port']} — "
+                  f"Настройки → Продвинутые настройки → Тип соединения.")
         link = tgproxy.link_for(found)
+        if not link:
+            # Ссылки для HTTP-прокси у Telegram нет вовсе. Отправить его как
+            # SOCKS5 (так было раньше) — значит получить «прокси настроен
+            # неверно и будет отключён» и потерять уже настроенный прокси.
+            self._logput(f"[*] {found['title']} — добавляется только руками: "
+                         f"ссылки tg:// для HTTP-прокси не существует.")
+            self._logput(manual)
+            return False
         ok, how = tgproxy.open_link(link)
-        self._logput(f"    Вручную это: {found['kind'] or 'SOCKS5'}, "
-                     f"{found['host']}, порт {found['port']} — Настройки → "
-                     f"Продвинутые настройки → Тип соединения.")
+        self._logput(manual)
         if ok:
             self._logput(f"[*] Отдал ссылку в {how} — подтверди добавление "
                          f"в Telegram.")
@@ -1592,11 +1645,13 @@ class Api:
         if not seen:
             return
         box = self.s.setdefault("seen_hosts", {})
+        stamp = self.s.setdefault("seen_hosts_at", {})
         changed = False
         for gid, hosts in seen.items():
             keep = list(hosts)[-4:]        # четырёх свежих хватает
             if box.get(gid) != keep:
                 box[gid] = keep
+                stamp[gid] = int(time.time())
                 changed = True
         if changed:
             settings_store.save(self.s)
@@ -1614,8 +1669,20 @@ class Api:
         box = self.s.get("seen_hosts") or {}
         if not box:
             return {}
+        stamp = self.s.get("seen_hosts_at") or {}
+        now = int(time.time())
         out, drop = {}, False
         for gid, hosts in box.items():
+            # Протухшие по времени выбрасываем не глядя. Проверить их иначе
+            # нечем: rr4---sn-....googlevideo.com разрешается через
+            # *.googlevideo.com и после того, как сессия давно кончилась, —
+            # то есть DNS про это молчит.
+            age = now - int(stamp.get(gid, 0) or 0)
+            if age > SEEN_HOSTS_TTL:
+                if hosts:
+                    box[gid] = []
+                    drop = True
+                continue
             live = [h for h in list(hosts)[:6] if self._resolves(h)]
             if live != list(hosts):
                 box[gid] = live

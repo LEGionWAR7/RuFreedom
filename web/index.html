@@ -1259,7 +1259,10 @@ function paintTelegram(st){
       d.querySelector(".why").textContent = f.note || "";
       if (!f.broken){
         const b = document.createElement("button");
-        b.className = "go"; b.textContent = "Настроить Telegram";
+        b.className = "go";
+        // У HTTP-прокси ссылки tg:// не существует — обещать «настроить в
+        // одно нажатие» тут нельзя, добавляется он только руками.
+        b.textContent = f.kind === "http" ? "Как добавить" : "Настроить Telegram";
         b.onclick = () => Promise.resolve(api("telegram_open", f.port)).finally(loop);
         d.appendChild(b);
       }
@@ -1271,6 +1274,7 @@ function paintTelegram(st){
   let hint;
   if (st.tg_searching) hint = "Проверяю каждый порт настоящим подключением к дата-центру Telegram — открытый порт ещё не значит рабочий прокси.";
   else if (!sc) hint = "Нажми «Найти прокси» — я обойду типовые порты локальных клиентов.";
+  else if (sc.best && sc.best.kind === "http") hint = "Найден HTTP-прокси. Ссылки для такого у Telegram нет — нажми «Как добавить», адрес и порт появятся в журнале. Работать он будет, пока запущен этот клиент.";
   else if (sc.best) hint = "Нажми «Настроить Telegram» — откроется ссылка, Telegram сам предложит добавить прокси. Работать он будет, пока запущен этот клиент.";
   else if ((sc.clients||[]).length) hint = "Запущены: " + sc.clients.join(", ") + " — но локальный прокси в них не включён. Включи режим SOCKS5 на 127.0.0.1 в настройках клиента.";
   else hint = "Прокси-клиентов не запущено. Для Telegram подойдёт tg-ws-proxy (не требует сервера) или NekoBox.";

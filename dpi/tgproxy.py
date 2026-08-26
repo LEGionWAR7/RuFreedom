@@ -356,8 +356,9 @@ def scan(host: str = "127.0.0.1", stop=None, progress=None) -> Dict:
                         pass
 
     working = [f for f in found if not f.get("broken")]
-    # MTProto-мост предпочтительнее: он поднят именно ради Telegram
-    working.sort(key=lambda f: 0 if f["kind"] == "mtproto" else 1)
+    # HTTP-прокси годится, но добавлять его придётся руками, поэтому он
+    # последний: при прочих равных предлагаем то, что ставится в одно нажатие.
+    working.sort(key=lambda f: KIND_ORDER.get(f.get("kind"), 9))
     return {"best": working[0] if working else None,
             "all": found,
             "clients": running_clients(),
@@ -457,7 +458,28 @@ def open_link(link: str) -> Tuple[bool, str]:
         return False, str(exc)
 
 
+# Что предпочесть, если рабочих нашлось несколько. Порядок не вкусовой:
+#   mtproto — поднят ровно ради Telegram, добавляется одной ссылкой;
+#   socks5  — Telegram умеет добавлять его ссылкой tg://socks;
+#   http    — ссылки для него НЕ существует, только руками в настройках.
+KIND_ORDER = {"mtproto": 0, "socks5": 1, "http": 2}
+
+
 def link_for(found: dict) -> str:
-    if found.get("kind") == "mtproto":
+    """Ссылка tg:// для находки. Пусто — значит ссылкой её не добавить.
+
+    У Telegram есть ровно две схемы прокси: tg://proxy (MTProto) и tg://socks
+    (SOCKS5). Для HTTP-прокси схемы нет вообще.
+
+    Раньше сюда попадал любой вид, и HTTP-прокси уходил в Telegram под видом
+    SOCKS5. Telegram честно пытался говорить с ним по SOCKS5, получал в ответ
+    HTTP и показывал «The proxy you are using is not configured correctly and
+    will be disabled» — после чего ВЫКЛЮЧАЛ прокси. Со стороны это выглядело
+    так, будто программа сама его отключает.
+    """
+    kind = found.get("kind")
+    if kind == "mtproto":
         return tg_mtproto_link(found["host"], found["port"], found.get("secret", ""))
-    return tg_socks_link(found["host"], found["port"])
+    if kind == "socks5":
+        return tg_socks_link(found["host"], found["port"])
+    return ""
