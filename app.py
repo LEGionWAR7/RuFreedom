@@ -17,6 +17,7 @@ import ctypes
 import json
 import os
 import pathlib
+import socket
 import sys
 import threading
 import time
@@ -1601,9 +1602,37 @@ class Api:
             settings_store.save(self.s)
 
     def _probe_extra(self) -> dict:
-        """Запомненные имена для оценки финалистов."""
+        """Запомненные имена — но только те, что ещё живы.
+
+        Имена вроде rr5---sn-q4fl6nzy.googlevideo.com выдаются под сессию и
+        через сутки перестают существовать. А проверка кандидата требует, чтобы
+        прошли ВСЕ хосты группы — значит одно протухшее имя навсегда лишает
+        группу возможности подобрать хоть что-нибудь. Отсеиваем по DNS: имя,
+        которое не разрешается, мертво. Блокировка на это не влияет — режут по
+        SNI уже после разрешения имени, DNS при этом отвечает как обычно.
+        """
         box = self.s.get("seen_hosts") or {}
-        return {gid: list(hosts)[:3] for gid, hosts in box.items() if hosts}
+        if not box:
+            return {}
+        out, drop = {}, False
+        for gid, hosts in box.items():
+            live = [h for h in list(hosts)[:6] if self._resolves(h)]
+            if live != list(hosts):
+                box[gid] = live
+                drop = True
+            if live:
+                out[gid] = live[:3]
+        if drop:
+            settings_store.save(self.s)
+        return out
+
+    @staticmethod
+    def _resolves(host: str) -> bool:
+        try:
+            socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+            return True
+        except Exception:                            # noqa: BLE001
+            return False
 
     def _conflict_tick(self):
         """Кто ещё занял драйвер или увёл трафик в туннель."""
