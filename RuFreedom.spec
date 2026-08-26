@@ -48,7 +48,9 @@ print('[spec] версия', VERSION)
 # В сборку кладём образцы настроек, но НЕ личные файлы: settings.json --
 # это состояние конкретного компьютера (какие сервисы у человека закрыты,
 # что подобралось), и раздавать его вместе с программой незачем.
-datas = [('assets', 'assets'), ('web', 'web')]
+datas = [('assets', 'assets'), ('web', 'web'),
+         # журнал изменений читается прямо из программы, без интернета
+         ('CHANGELOG.md', '.')]
 for _name in ('rufreedom.ini', 'hostlist.txt'):
     _p = _os.path.join(_root, 'config', _name)
     if _os.path.isfile(_p):

@@ -29,6 +29,8 @@ import urllib.parse
 import urllib.request
 from typing import Callable, Dict, List, Optional, Tuple
 
+from . import changelog
+
 # Здесь живут релизы. Меняется одной строкой, если репозиторий переедет.
 OWNER = "LEGionWAR7"
 REPO = "RuFreedom"
@@ -36,7 +38,7 @@ REPO = "RuFreedom"
 # ЕДИНСТВЕННОЕ место, где живёт номер версии. Паспорт exe
 # (version_info.txt) собирается из него при сборке, руками его
 # править не надо -- иначе номера разъедутся.
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 API_URL = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
 RELEASES_URL = f"https://github.com/{OWNER}/{REPO}/releases"
@@ -325,33 +327,58 @@ def releases(limit: int = 20, timeout: float = _TIMEOUT) -> Dict:
     когда человек открыл настройки, и дёргать его при каждом запуске незачем.
     """
     out = {"items": [], "error": ""}
+
+    # Основа — журнал внутри программы. У релизов на GitHub описание бывает
+    # пустым (у всех выпусков до 1.3.0 так и было: теги стоят, а что в них
+    # изменилось, не написано), да и интернета может не быть вовсе. Журнал
+    # должен открываться в любом случае.
+    merged: Dict[str, Dict] = {}
+    for tag, item in changelog.entries().items():
+        # подпись как у тегов на GitHub, чтобы список не выглядел разнобоем
+        merged[_key(tag)] = {"tag": "v" + tag, "name": "v" + tag,
+                             "published": item["published"],
+                             "notes": item["notes"], "url": RELEASES_URL}
+
+    data = None
     try:
         data = _api(LIST_URL, timeout)
     except urllib.error.HTTPError as exc:
-        out["error"] = "релизов пока нет" if exc.code == 404 else f"GitHub: {exc.code}"
-        return out
+        out["error"] = "" if merged else (
+            "релизов пока нет" if exc.code == 404 else f"GitHub: {exc.code}")
     except Exception as exc:                       # noqa: BLE001
-        out["error"] = str(exc) or "нет связи с GitHub"
-        return out
-    if not isinstance(data, list):
-        out["error"] = "неожиданный ответ GitHub"
-        return out
-    for rel in data[:limit]:
-        tag = (rel.get("tag_name") or "").strip()
-        if not tag:
-            continue
-        out["items"].append({
-            "tag": tag,
-            "name": (rel.get("name") or tag).strip(),
-            "published": (rel.get("published_at") or "")[:10],
-            "notes": (rel.get("body") or "").strip(),
-            "url": rel.get("html_url") or RELEASES_URL,
-            "current": _cmp(tag, VERSION) == 0,
-            "newer": is_newer(tag),
-        })
-    if not out["items"]:
+        out["error"] = "" if merged else (str(exc) or "нет связи с GitHub")
+
+    if isinstance(data, list):
+        for rel in data[:limit]:
+            tag = (rel.get("tag_name") or "").strip()
+            if not tag:
+                continue
+            body = (rel.get("body") or "").strip()
+            item = merged.setdefault(_key(tag), {"tag": tag, "name": tag,
+                                                 "published": "", "notes": "",
+                                                 "url": RELEASES_URL})
+            item["tag"] = tag
+            item["name"] = (rel.get("name") or "").strip() or item["name"]
+            item["published"] = (rel.get("published_at") or "")[:10] or item["published"]
+            item["url"] = rel.get("html_url") or item["url"]
+            # Описание с GitHub перекрывает местное: там оно может быть свежее
+            # той сборки, что стоит у человека. Пустым — не перекрывает.
+            if body:
+                item["notes"] = body
+
+    for key in sorted(merged, key=parse_version, reverse=True)[:limit]:
+        item = dict(merged[key])
+        item["current"] = _cmp(item["tag"], VERSION) == 0
+        item["newer"] = is_newer(item["tag"])
+        out["items"].append(item)
+    if not out["items"] and not out["error"]:
         out["error"] = "релизов пока нет"
     return out
+
+
+def _key(tag: str) -> str:
+    """Тег без «v» — чтобы v1.3.0 и 1.3.0 были одной записью."""
+    return str(tag).strip().lstrip("vV")
 
 
 def asset_urls(data: Dict) -> List[str]:

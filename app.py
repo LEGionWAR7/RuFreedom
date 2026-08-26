@@ -50,6 +50,23 @@ WATCH_STRIKES = 2
 WATCH_COOLDOWN = 3600.0
 # Сколько прошедших комбинаций собираем на группу, прежде чем выбирать
 # лучшую. Один -- это «первый попавшийся», а он не обязательно лучший.
+# Таймаут одного рукопожатия.
+#
+# Замерено на живой сети: до открытого хоста рукопожатие проходит за
+# 0.15-1.3 с, а заблокированный НИКОГДА не отвечает отказом — он молчит до
+# упора. Значит таймаут это и есть цена одной неудачной проверки, а неудачных
+# в переборе подавляющее большинство.
+#
+# 3 секунды -- не «двойной запас», а осознанный компромисс. Замер снят БЕЗ
+# обхода; с включённым десинком рукопожатие может стать чуть медленнее
+# (переупорядоченные сегменты сервер иногда ждёт). Срезать до 2 с было бы
+# соблазнительно, но ценой изредка забракованной рабочей стратегии -- а
+# подтверждения она уже не увидит, потому что до него не дойдёт.
+SCAN_TIMEOUT = 3.0
+# Там, где решается судьба стратегии (подтверждение и финал), спешить нельзя:
+# лишняя секунда стоит дёшево, ошибочно забракованный победитель — дорого.
+CHECK_TIMEOUT = 4.0
+
 FINALISTS = 3
 # Сколько комбинаций проверяем ПОСЛЕ первой удачной, если трёх так и не
 # набралось. Без этого потолка группа, которой подходит ровно одна стратегия,
@@ -529,6 +546,7 @@ class Api:
         cfg.seqovl = int(self.s["seqovl"])
 
         enabled = self._enabled_groups()
+        cards = list(enabled)          # что включил человек, до отбора по диагнозу
 
         # Трогаем ТОЛЬКО то, что доказанно заблокировано по имени сайта.
         #
@@ -577,8 +595,17 @@ class Api:
         else:
             cfg.host_groups = services.host_group_map(enabled)
             cfg.hosts = set(cfg.host_groups)
-        cfg.udp_ranges = {gid: services.udp_range(gid) for gid in enabled
-                          if services.udp_range(gid)}
+        # Голосовой UDP — по галочке пользователя, а НЕ по диагнозу.
+        #
+        # Здесь и была настоящая причина, по которой у друга демонстрация
+        # экрана не работала совсем: диагностика проверяет discord.com и
+        # gateway.discord.gg, они в России открываются, группа получает
+        # вердикт «ok» и уезжает в «не трогаю» — вместе с голосом. А голос
+        # диагностика не проверяет вообще: он ходит по UDP, а не по TLS.
+        # Поэтому берём карточки, включённые человеком, до отбора по диагнозу.
+        cfg.udp_ranges = ({gid: services.udp_range(gid) for gid in cards
+                           if services.udp_range(gid)}
+                          if self.s["voice_fake"] else {})
         return cfg
 
     def _hosts(self) -> set:
@@ -713,7 +740,7 @@ class Api:
         # полный план: сперва проверенные комбинации, затем сетка добора.
         # Без сетки подбор упирался в список и сдавался — а youtubei
         # берётся только ею.
-        combos = autotune.all_candidates()
+        combos = autotune.all_candidates(self._known_good())
         finalists: dict = {}          # {группа: [прошедшие комбинации]}
         first_hit: dict = {}          # {группа: номер её первой удачи}
         won = {}
@@ -736,12 +763,12 @@ class Api:
             if not pending:
                 break
             self.auto["progress"] = max(0.03, i / len(combos))
-            self.auto["eta"] = autotune.eta_seconds(len(pending), i)
+            self.auto["eta"] = autotune.eta_seconds(len(pending), i, len(combos))
             self.auto["status"] = f"Проверяю: {combo['label']} ({i + 1}/{len(combos)})"
             for gid in pending:
                 self._mx(gid, "test")
 
-            ok, opened = self._test_candidate(combo, pending)
+            ok, opened = self._test_candidate(combo, pending, timeout=SCAN_TIMEOUT)
             if not opened:
                 open_fails += 1
                 # проблема с драйвером, а не со стратегией: две минуты молчаливых
@@ -774,7 +801,8 @@ class Api:
             self.auto["status"] = f"Перепроверяю: {combo['label']}"
             for gid in maybe:
                 self._mx(gid, "test")
-            ok2, opened2 = self._test_candidate(combo, maybe, tries=3)
+            ok2, opened2 = self._test_candidate(combo, maybe, tries=3,
+                                                timeout=CHECK_TIMEOUT)
 
             hit, flaky = [], []
             for gid in maybe:
@@ -860,6 +888,21 @@ class Api:
         self._logput("[*] Включаю обход с подобранными настройками.")
         self.start()
 
+    def _known_good(self) -> list:
+        """Комбинации, которые уже работали на этой машине, — первыми в очередь.
+
+        Сеть и провайдер у человека те же, что в прошлый раз, поэтому прошлый
+        ответ верен куда чаще любого кандидата из общего списка. Стоит проверка
+        одну итерацию, а выигрывает, когда подбор запускают повторно, — минуты.
+        """
+        out = []
+        for gid, body in (self.s.get("profiles") or {}).items():
+            c = autotune.profile_to_candidate(
+                body, f"прошлый выбор: {services.title(gid)}")
+            if c is not None:
+                out.append(c)
+        return out
+
     def _playoff(self, finalists: dict, gen: int) -> dict:
         """Из прошедших комбинаций выбрать для каждой группы лучшую.
 
@@ -929,15 +972,15 @@ class Api:
         try:
             if not eng.running:
                 return {}
-            time.sleep(0.2)
-            return autotune.score_probes(groups, 4, rounds=3,
+            time.sleep(0.1)
+            return autotune.score_probes(groups, CHECK_TIMEOUT, rounds=3,
                                          extra=self._probe_extra())
         finally:
             eng.stop()
             th.join(timeout=4)
-            time.sleep(0.2)
+            time.sleep(0.1)
 
-    def _test_candidate(self, combo, groups, tries=2):
+    def _test_candidate(self, combo, groups, tries=2, timeout=CHECK_TIMEOUT):
         """Прогнать одну комбинацию на проверочных хостах групп.
 
         Возвращает ({группа: пробило}, открылся ли драйвер). Второе важно
@@ -960,12 +1003,12 @@ class Api:
                 # ничего не говорит человеку, который сидит далеко.
                 self._last_open_error = eng.error or "причина неизвестна"
                 return {}, False
-            time.sleep(0.2)
-            return autotune.test_probes(groups, 4, tries), True
+            time.sleep(0.1)
+            return autotune.test_probes(groups, timeout, tries), True
         finally:
             eng.stop()
             th.join(timeout=4)
-            time.sleep(0.2)
+            time.sleep(0.1)
 
     def run_diagnose(self, progress=None):
         """Проверить прямо сейчас, чем закрыт каждый сервис.

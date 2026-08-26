@@ -57,6 +57,11 @@ _UDP_FLOW_MAX = 2048
 # первые N пакетов UDP-потока получают подделку, дальше поток не трогаем
 _UDP_FLOW_CUTOFF = 4
 
+# Потолок TTL для голосовой подделки. Оборудование, которое режет Discord,
+# стоит у провайдера — это первые хопы. Дальше подделке ехать незачем, а вот
+# доехать до собеседника ей нельзя ни при каких настройках.
+_VOICE_FAKE_TTL = 2
+
 
 class Engine:
     def __init__(self, config, logger: Optional[Callable[[str], None]] = None) -> None:
@@ -247,8 +252,15 @@ class Engine:
         ranges = getattr(self.cfg, "udp_ranges", None) or {}
         profiles = getattr(self.cfg, "profiles", None) or {}
         for gid, spans in ranges.items():
+            if not spans:
+                continue
             prof = profiles.get(gid)
-            if prof is None or not prof.udp_fake or not spans:
+            # Профиля у группы может не быть вовсе, и это НОРМАЛЬНО: TCP-обход
+            # Discord не нужен (discord.com открывается сам), а голос прикрыть
+            # надо. Раз диапазон сюда положили — значит человек включил
+            # карточку и не выключал голосовой обход; больше спрашивать не у
+            # кого. Профиль спрашиваем, только если он есть.
+            if prof is not None and not prof.udp_fake:
                 continue
             # у группы может быть несколько диапазонов (у Discord их два)
             if spans and isinstance(spans[0], (list, tuple)):
@@ -542,28 +554,26 @@ class Engine:
             self._handle_quic(pkt, payload)
             return
 
-        # Не-QUIC UDP: голос и демонстрация экрана Discord. Диапазон широкий
-        # (50000-65535), поэтому в него попадает и игровой трафик. Отделяем по
-        # АДРЕСУ: он известен из TCP-соединений к тем же серверам. Чужой адрес
-        # пропускаем нетронутым — трогать игры мы не имеем права.
+        # Не-QUIC UDP: голос и демонстрация экрана Discord.
+        #
+        # Решаем по порту — диапазон узкий, и попасть в него чужому почти
+        # нечем. Требовать вдобавок знакомый АДРЕС (как делала 1.2.0) нельзя:
+        # адреса мы узнаём с TCP-пути, а он для Discord часто выключен —
+        # discord.com открывается сам, и группа уходит в «не трогаю». Тогда
+        # адрес не узнать никогда, и голос оставался без обхода.
+        #
+        # Адрес всё же смотрим, но только чтобы ОТКАЗАТЬСЯ: если сервер
+        # заведомо принадлежит другой группе, пакет не наш.
         known = self._ip_group.get(pkt.dst_addr or "")
         for lo, hi, gid in self._udp_spans:
             if not (lo <= dport <= hi):
                 continue
             if known is not None and known != gid:
                 break                      # это чужой сервер, не наш
-            if known is None and self._wide_span(lo, hi):
-                break                      # широкий диапазон, адрес незнаком:
-                                           # по одному порту решать нельзя
             self._handle_voice(pkt, payload, gid)
             return
 
         self._w.send(pkt)
-
-    @staticmethod
-    def _wide_span(lo: int, hi: int) -> bool:
-        """Диапазон настолько широк, что по одному порту решать нельзя."""
-        return hi - lo > 2000
 
     def _handle_quic(self, pkt, payload: bytes) -> None:
         group = self._ip_group.get(pkt.dst_addr or "")
@@ -604,8 +614,18 @@ class Engine:
 
         DPI решает судьбу потока по его первым пакетам, поэтому подделку шлём
         только в начале — дальше поток идёт нетронутым и нагрузки не создаёт.
-        Подделка уходит с низким TTL: до собеседника она не доедет, значит
-        испорченных датаграмм у него не появится.
+        Подделка уходит с ЗАВЕДОМО низким TTL — не тем, что подобран для TCP.
+        Разница принципиальная: подбор спокойно выбирает ttl 8, а с ним
+        подделка долетает до голосового сервера Discord и садится на тот же
+        сокет, что и настоящий голос. Сервер отвечает на мусор, клиент видит
+        два разных ответа на определение адреса и не подключается вовсе.
+        С потолком в два хопа подделку видит только оборудование провайдера,
+        ради которого она и нужна, а до сервера она не доезжает никогда.
+
+        И сама подделка — не случайные байты, а синтаксически верный QUIC:
+        если она всё-таки куда-то доедет, её опознают как чужой протокол и
+        молча выбросят, тогда как случайный мусор может случайно совпасть с
+        разбираемым пакетом.
         """
         key = (pkt.dst_addr or "", pkt.dst_port or 0)
         seen = self._udp_flows.get(key, 0)
@@ -620,8 +640,9 @@ class Engine:
             self.stats["quic"] += 1
             self._note("voice", f"[+] UDP {key[1]} [{group}] -> подделка перед голосом")
             try:
-                self._w.send(self._build(pkt, header, os.urandom(len(payload)),
-                                         ttl=prof.fake_ttl))
+                self._w.send(self._build(pkt, header,
+                                         fakes.quic_fake(len(payload)),
+                                         ttl=min(prof.fake_ttl, _VOICE_FAKE_TTL)))
             except Exception:
                 pass
         self._w.send(pkt)
@@ -699,6 +720,14 @@ class Engine:
             p.ipv6.packet_len = len(raw)
             if ttl is not None:
                 p.ipv6.hop_limit = ttl
+        if p.udp is not None:
+            # У UDP своё поле длины, и его тоже надо чинить. TCP этим не
+            # страдает — там длины в заголовке нет вовсе, поэтому раньше
+            # проблема не всплывала: единственная UDP-подделка (QUIC) по
+            # случайности выходила ровно того же размера, что и оригинал.
+            # Голосовая подделка такого совпадения не даёт, и датаграмма с
+            # неверной длиной — это уже битый пакет.
+            p.udp.payload_len = len(chunk)
         if seq is not None and p.tcp is not None:
             p.tcp.seq_num = seq
         return p

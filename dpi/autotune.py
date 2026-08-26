@@ -187,13 +187,22 @@ GRID_OVERLAPS = [0, 568]
 def grid_candidates() -> List[Dict]:
     """Комбинации добора — их пробуют, если список выше не сработал.
 
-    Порядок: сначала всё без перекрытия (дешевле и чаще срабатывает), затем то
-    же самое с перекрытием. Так первый же проход покрывает главное.
+    Порядок продуман, потому что он и есть время ожидания. Решает почти всегда
+    ТОЧКА РАЗРЕЗА, а число сегментов — почти никогда: у одного хоста берёт
+    `first-char`, у соседнего только `host-start`, разница в один байт, а
+    x3 против x5 меняет исход куда реже. Поэтому идём от грубого к точному:
+    сначала все 15 точек разреза обеими стратегиями при x3 — это 30 проверок,
+    примерно две минуты, и они покрывают главное; и только потом добираем
+    число сегментов и перекрытие.
+
+    Раньше порядок был обратный (сначала все сегменты одной стратегии), и до
+    второй стратегии перебор доходил только на 61-й проверке — четыре минуты
+    впустую, если ответ лежал именно там.
     """
     out: List[Dict] = []
     for ovl in GRID_OVERLAPS:
-        for strat in GRID_STRATEGIES:
-            for segs in GRID_SEGMENTS:
+        for segs in GRID_SEGMENTS:
+            for strat in GRID_STRATEGIES:
                 for split in GRID_SPLITS:
                     tail = f" +перекрытие" if ovl else ""
                     out.append({
@@ -283,15 +292,67 @@ def summary_groups(ok: Dict[str, bool]) -> str:
     return f"{good}/{len(ok)} групп доступно"
 
 
-def all_candidates() -> List[Dict]:
-    """Полный план подбора: сперва проверенные комбинации, затем сетка."""
-    return list(CANDIDATES) + grid_candidates()
+def profile_to_candidate(body: Dict, label: str) -> Optional[Dict]:
+    """Обратное превращение: сохранённый профиль -> комбинация для перебора.
+
+    Нужно, чтобы подбор начинал с того, что уже работало у этого человека.
+    Сеть у него та же и провайдер тот же — прошлый ответ верен куда чаще, чем
+    любой кандидат из общего списка, а стоит проверка одну итерацию.
+    """
+    if not isinstance(body, dict) or not body.get("strategy"):
+        return None
+    out = {
+        "label": label,
+        "strategy": body["strategy"],
+        "split": body.get("split_mode", "pos2"),
+        "fooling": body.get("fooling", "badseq"),
+        "ttl": int(body.get("fake_ttl", 4)),
+        "fakes": int(body.get("fake_count", 1)),
+        "segs": int(body.get("seg_count", 3)),
+        "ovl": int(body.get("seqovl", 0)),
+        "id0": bool(body.get("ip_id_zero", False)),
+    }
+    sni = body.get("fake_sni")
+    if sni and sni != DEFAULT_FAKE_SNI:
+        out["sni"] = sni
+    return out
 
 
-def eta_seconds(pending: int, done: int) -> int:
-    """Грубая оценка остатка: один кандидат ≈ 8 секунд полного цикла."""
-    left = max(0, len(all_candidates()) - done)
-    return int(left * 8) if pending else 0
+def _shape(c: Dict) -> tuple:
+    """Что делает кандидат, без учёта подписи. Для отсева повторов."""
+    return (c["strategy"], c.get("split", "pos2"), c.get("fooling", "badseq"),
+            int(c.get("ttl", 4)), int(c.get("fakes", 1)), int(c.get("segs", 3)),
+            int(c.get("ovl", 0)), bool(c.get("id0", False)),
+            c.get("sni") or DEFAULT_FAKE_SNI)
+
+
+def all_candidates(head: Optional[List[Dict]] = None) -> List[Dict]:
+    """Полный план подбора: сперва проверенные комбинации, затем сетка.
+
+    `head` — то, что уже работало раньше; идёт первым и из остального списка
+    вычёркивается, чтобы не гонять одно и то же дважды.
+    """
+    out: List[Dict] = []
+    seen = set()
+    for c in list(head or []) + list(CANDIDATES) + grid_candidates():
+        key = _shape(c)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(c)
+    return out
+
+
+# Одна проверка = поднять движок, прогнать рукопожатия, погасить движок.
+# Считано на живой сети: рукопожатие к открытому хосту укладывается в 1.3 с,
+# к закрытому — всегда упирается в таймаут, быстрых отказов провайдер не даёт.
+SECONDS_PER_CANDIDATE = 4
+
+
+def eta_seconds(pending: int, done: int, total: Optional[int] = None) -> int:
+    """Грубая оценка остатка."""
+    left = max(0, (len(all_candidates()) if total is None else total) - done)
+    return int(left * SECONDS_PER_CANDIDATE) if pending else 0
 
 
 # --- совместимость со старым кодом ----------------------------------------
