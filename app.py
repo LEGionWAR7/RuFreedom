@@ -176,6 +176,8 @@ class Api:
                 s[key] = dflt
         s["all_traffic"] = bool(s.get("all_traffic", False))
         s["voice_fake"] = bool(s.get("voice_fake", True))
+        s["voice_ttl"] = max(0, min(64, int(s.get("voice_ttl", 0) or 0)))
+        s["voice_repeats"] = max(1, min(16, int(s.get("voice_repeats", 6) or 6)))
         s["watchdog"] = bool(s.get("watchdog", True))
         s["pause_on_anticheat"] = bool(s.get("pause_on_anticheat", False))
         ent = s.get("tg_entries")
@@ -253,6 +255,11 @@ class Api:
         prof = Profile.from_dict(body) if body else self._default_profile()
         if services.udp_range(gid):
             prof.udp_fake = bool(self.s["voice_fake"])
+            # Голосовые настройки живут отдельно от подобранного профиля:
+            # подбор их не проверяет и проверить не может — рукопожатия к
+            # голосовому серверу Discord со стороны не сделать.
+            prof.voice_ttl = int(self.s["voice_ttl"])
+            prof.voice_repeats = int(self.s["voice_repeats"])
         return prof
 
     def _default_profile(self) -> Profile:
@@ -345,6 +352,8 @@ class Api:
             "seqovl": self.s["seqovl"],
             "all_traffic": self.s["all_traffic"],
             "voice_fake": self.s["voice_fake"],
+            "voice_ttl": self.s["voice_ttl"],
+            "voice_repeats": self.s["voice_repeats"],
             "watchdog": self.s["watchdog"],
             "groups": groups,
             "diag_running": self.diag_running,
@@ -404,6 +413,17 @@ class Api:
         if self.s["profiles"].pop(gid, None) is not None:
             settings_store.save(self.s)
             self._logput(f"[*] {services.title(gid)}: свой обход сброшен.")
+        return True
+
+    def set_voice_ttl(self, value):
+        """TTL голосовой подделки. 0 — не трогать (так надёжнее всего)."""
+        self.s["voice_ttl"] = max(0, min(64, int(value or 0)))
+        settings_store.save(self.s)
+        return True
+
+    def set_voice_repeats(self, value):
+        self.s["voice_repeats"] = max(1, min(16, int(value or 6)))
+        settings_store.save(self.s)
         return True
 
     def set_voice_fake(self, on):
@@ -656,6 +676,22 @@ class Api:
             self._auto_thread.start()
         return True
 
+    def retune_group(self, gid):
+        """Подобрать обход заново для ОДНОЙ группы, поверх прежнего выбора.
+
+        Полный подбор идёт минутами и трогает все группы разом. Обычно же
+        отвалился один сервис, а остальные работают — и перебирать их заново
+        незачем, как незачем и терять по ним уже подобранное.
+        """
+        if gid not in services.GROUPS:
+            return self._auto_refuse("Неизвестная группа.")
+        if diagnose.hopeless(self.diag.get(gid, "")):
+            return self._auto_refuse(
+                f"{services.title(gid)}: соединение не устанавливается вовсе — "
+                f"обходить нечего, нужен прокси или VPN.")
+        self._logput(f"[*] Подбираю заново только для {services.title(gid)}.")
+        return self.run_autotune(only=[gid])
+
     def stop_autotune(self):
         """Прервать подбор. Уже подобранное не пропадает."""
         with self._lock:
@@ -802,7 +838,8 @@ class Api:
             for gid in maybe:
                 self._mx(gid, "test")
             ok2, opened2 = self._test_candidate(combo, maybe, tries=3,
-                                                timeout=CHECK_TIMEOUT)
+                                                timeout=CHECK_TIMEOUT,
+                                                extra=self._probe_extra())
 
             hit, flaky = [], []
             for gid in maybe:
@@ -814,6 +851,12 @@ class Api:
                 # выбираем лучшего по счёту. «Первый сработавший» -- не то же
                 # самое, что «лучший»: YouTube открывался, а видео не шло.
                 finalists.setdefault(gid, []).append(combo)
+                if gid not in first_hit:
+                    # ЗАКРЕПЛЯЕМ СРАЗУ, не дожидаясь финала. Подбор долгий, и
+                    # его часто прерывают на середине — раньше всё найденное
+                    # к этому моменту оставалось только в памяти. Финал потом
+                    # перезапишет профиль, если найдёт вариант получше.
+                    self._pin_profile(gid, combo)
                 first_hit.setdefault(gid, i)
                 self._mx(gid, "ok", combo["label"])
                 hit.append(services.title(gid))
@@ -833,10 +876,7 @@ class Api:
 
         # 2. сохранить: своей группе — свой профиль
         for gid, combo in won.items():
-            prof = autotune.candidate_to_profile(
-                combo, quic_mode=self.s["quic_mode"],
-                udp_fake=bool(services.udp_range(gid)) and self.s["voice_fake"])
-            self.s["profiles"][gid] = prof.to_dict()
+            self._pin_profile(gid, combo, save=False)
 
         if won:
             # самый частый победитель становится общим профилем — им работают
@@ -887,6 +927,17 @@ class Api:
             return
         self._logput("[*] Включаю обход с подобранными настройками.")
         self.start()
+
+    def _pin_profile(self, gid, combo, save: bool = True) -> None:
+        """Закрепить за группой подобранную комбинацию."""
+        prof = autotune.candidate_to_profile(
+            combo, quic_mode=self.s["quic_mode"],
+            udp_fake=bool(services.udp_range(gid)) and self.s["voice_fake"])
+        self.s["profiles"][gid] = prof.to_dict()
+        if save:
+            settings_store.save(self.s)
+            self._logput(f"[*] {services.title(gid)}: «{combo['label']}» "
+                         f"закреплён — прервёшь подбор, он останется.")
 
     def _known_good(self) -> list:
         """Комбинации, которые уже работали на этой машине, — первыми в очередь.
@@ -980,7 +1031,8 @@ class Api:
             th.join(timeout=4)
             time.sleep(0.1)
 
-    def _test_candidate(self, combo, groups, tries=2, timeout=CHECK_TIMEOUT):
+    def _test_candidate(self, combo, groups, tries=2, timeout=CHECK_TIMEOUT,
+                        extra=None):
         """Прогнать одну комбинацию на проверочных хостах групп.
 
         Возвращает ({группа: пробило}, открылся ли драйвер). Второе важно
@@ -990,6 +1042,10 @@ class Api:
         prof = autotune.candidate_to_profile(combo, quic_mode=self.s["quic_mode"])
         cfg = Config()
         cfg.host_groups = {host: gid for gid, host in autotune.probe_targets(groups)}
+        for gid, hosts in (extra or {}).items():
+            if gid in groups:
+                for h in hosts:
+                    cfg.host_groups[h] = gid
         cfg.hosts = set(cfg.host_groups)
         cfg.profiles = {gid: prof for gid in groups}
         eng = Engine(cfg, logger=lambda *_: None)
@@ -1004,7 +1060,7 @@ class Api:
                 self._last_open_error = eng.error or "причина неизвестна"
                 return {}, False
             time.sleep(0.1)
-            return autotune.test_probes(groups, timeout, tries), True
+            return autotune.test_probes(groups, timeout, tries, extra=extra), True
         finally:
             eng.stop()
             th.join(timeout=4)
@@ -1203,19 +1259,6 @@ class Api:
             self._logput(f"[!] Не открылся браузер: {exc}")
             return False
 
-    def hide_window(self):
-        """«Скрыть всё»: окно уходит в трей, обход продолжает работать."""
-        win = globals().get("_window")
-        if win is None:
-            return False
-        try:
-            win.hide()
-            self._logput("[*] Окно свёрнуто в трей. Обход продолжает работать.")
-            return True
-        except Exception as exc:                     # noqa: BLE001
-            self._logput(f"[!] Не удалось свернуть: {exc}")
-            return False
-
     def open_releases(self):
         """Открыть страницу релизов в браузере. Скачивает человек, не мы."""
         url = self.upd.get("url") or update.RELEASES_URL
@@ -1296,11 +1339,22 @@ class Api:
         def progress(net, i, total):
             self.bridge_scan.update({"net": net, "step": i, "total": total})
 
-        self.bridge_scan.update({"running": True, "net": "", "step": 0, "total": 0})
+        def on_found(item):
+            # Докладываем сразу, а не в самом конце. Адрес в журнал не пишем:
+            # его нельзя давать переписать руками.
+            box = self.bridge_scan.setdefault("entries", [])
+            if item not in box:
+                box.append(item)
+            self._logput(f"[*] Точка входа найдена (DC{item.get('dc', '?')}). "
+                         f"Всего: {len(box)}.")
+
+        self.bridge_scan.update({"running": True, "net": "", "step": 0,
+                                 "total": 0, "entries": []})
         try:
             self._logput("[*] Ищу точку входа для встроенного моста…")
             found = tgbridge.find_entries(progress=progress,
-                                          stop=self._bridge_stop, limit=3)
+                                          stop=self._bridge_stop, limit=3,
+                                          on_found=on_found)
             self.bridge_scan["entries"] = found
             self.s["tg_entries"] = found
             settings_store.save(self.s)
@@ -1311,7 +1365,21 @@ class Api:
     def _scan_proxies(self) -> dict:
         """Шаг 2: уже запущенный на этом компьютере прокси-клиент."""
         self._logput("[*] Смотрю, нет ли уже запущенного прокси…")
-        res = tgproxy.scan(stop=self._bridge_stop)
+        live: list = []
+
+        def progress(done, total, item):
+            # Каждая находка видна СРАЗУ. Раньше весь список появлялся одним
+            # куском в конце, и до этого момента экран не менялся вовсе.
+            live.append(item)
+            self.tg_scan = {"best": next((f for f in live if not f.get("broken")), None),
+                            "all": list(live), "clients": [],
+                            "scanned": total, "alive": total, "running": True}
+            if item.get("broken"):
+                return
+            self.tg_proxy = self.tg_proxy or item
+            self._logput(f"[*] Нашёл: {item['title']} — {item['note']}.")
+
+        res = tgproxy.scan(stop=self._bridge_stop, progress=progress)
         self.tg_scan = res
         self.tg_proxy = res.get("best")
         return res
@@ -1385,14 +1453,18 @@ class Api:
             self._logput("[!] Мост не запущен.")
             return False
         link = tgbridge.socks_link("127.0.0.1", tgbridge.DEFAULT_PORT)
-        try:
-            os.startfile(link)          # noqa: S606 — ссылка tg://, не файл
-            self._logput(f"[*] Открыл {link} — подтверди в Telegram.")
+        ok, how = tgproxy.open_link(link)
+        # Настройки называем ВСЕГДА, а не только при ошибке: если окно выбора
+        # приложения свернуть или закрыть не выбрав ничего, Telegram считает
+        # ссылку отменённой и гасит прокси, а человек остаётся без подсказки.
+        self._logput(f"    Вручную это: SOCKS5, 127.0.0.1, порт "
+                     f"{tgbridge.DEFAULT_PORT} — Настройки → Продвинутые "
+                     f"настройки → Тип соединения.")
+        if ok:
+            self._logput(f"[*] Отдал ссылку в {how} — подтверди в Telegram.")
             return True
-        except Exception as exc:  # noqa: BLE001
-            self._logput(f"[!] Не открылось ({exc}). Настрой вручную: SOCKS5, "
-                         f"127.0.0.1, порт {tgbridge.DEFAULT_PORT}.")
-            return False
+        self._logput(f"[!] Не открылось ({how}).")
+        return False
 
     def telegram_open(self, port=None):
         """Открыть ссылку tg://, чтобы Telegram сам предложил добавить прокси."""
@@ -1408,15 +1480,16 @@ class Api:
             self._logput("[!] Сначала найди прокси — нечего открывать.")
             return False
         link = tgproxy.link_for(found)
-        try:
-            os.startfile(link)          # noqa: S606 — это ссылка tg://, не файл
-            self._logput(f"[*] Открыл {link} — подтверди добавление в Telegram.")
+        ok, how = tgproxy.open_link(link)
+        self._logput(f"    Вручную это: {found['kind'] or 'SOCKS5'}, "
+                     f"{found['host']}, порт {found['port']} — Настройки → "
+                     f"Продвинутые настройки → Тип соединения.")
+        if ok:
+            self._logput(f"[*] Отдал ссылку в {how} — подтверди добавление "
+                         f"в Telegram.")
             return True
-        except Exception as exc:  # noqa: BLE001
-            self._logput(f"[!] Не удалось открыть ссылку ({exc}). "
-                         f"Настрой вручную: {found['kind'] or 'SOCKS5'}, "
-                         f"{found['host']}, порт {found['port']}.")
-            return False
+        self._logput(f"[!] Не удалось открыть ссылку ({how}).")
+        return False
 
     def telegram_link(self, port=None):
         """Текст ссылки — чтобы можно было скопировать руками."""
@@ -1434,12 +1507,6 @@ class Api:
         if not self.tg_scan:
             return self.telegram_connect()
         return self.telegram_open()
-
-    def retune_group(self, gid):
-        """Перепобрать обход для одной группы (кнопка на карточке)."""
-        if gid not in services.GROUPS:
-            return False
-        return self.run_autotune(only=[gid])
 
     # -- автостарт первого запуска ----------------------------------------
     def maybe_auto_config(self, skip_diag=False):   # noqa: D401
@@ -1536,7 +1603,7 @@ class Api:
     def _probe_extra(self) -> dict:
         """Запомненные имена для оценки финалистов."""
         box = self.s.get("seen_hosts") or {}
-        return {gid: list(hosts)[:2] for gid, hosts in box.items() if hosts}
+        return {gid: list(hosts)[:3] for gid, hosts in box.items() if hosts}
 
     def _conflict_tick(self):
         """Кто ещё занял драйвер или увёл трафик в туннель."""

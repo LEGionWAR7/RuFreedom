@@ -89,6 +89,14 @@ class Profile:
     quic_mode: str = "drop"
     # десинхронизация обычного UDP (голос Discord), а не QUIC
     udp_fake: bool = False
+    # TTL голосовой подделки. 0 — не трогать вовсе (так у zapret, и так по
+    # умолчанию): подделка это заведомо чужой для голоса протокол, сервер
+    # отбрасывает её сам, а зажатый TTL мешает её увидеть тому единственному,
+    # ради кого она посылается, — оборудованию провайдера.
+    voice_ttl: int = 0
+    # Сколько раз повторить голосовую подделку. У zapret шесть: одиночную
+    # DPI успевает проглядеть.
+    voice_repeats: int = 6
 
     def normalized(self) -> "Profile":
         p = replace(self)
@@ -104,6 +112,8 @@ class Profile:
         p.fake_count = max(1, min(8, int(p.fake_count)))
         p.seg_count = max(2, min(6, int(p.seg_count)))
         p.seqovl = max(0, min(1400, int(p.seqovl)))
+        p.voice_ttl = max(0, min(64, int(p.voice_ttl)))
+        p.voice_repeats = max(1, min(16, int(p.voice_repeats)))
         p.ip_id_zero = bool(p.ip_id_zero)
         # Подделка с fooling=none дошла бы до сервера как настоящий ClientHello
         # и сломала бы рукопожатие сильнее любой блокировки.
@@ -150,7 +160,8 @@ class Profile:
                 "fake_count": self.fake_count, "seg_count": self.seg_count,
                 "fake_sni": self.fake_sni, "seqovl": self.seqovl,
                 "ip_id_zero": self.ip_id_zero,
-                "quic_mode": self.quic_mode, "udp_fake": self.udp_fake}
+                "quic_mode": self.quic_mode, "udp_fake": self.udp_fake,
+                "voice_ttl": self.voice_ttl, "voice_repeats": self.voice_repeats}
 
     @classmethod
     def from_dict(cls, d) -> "Profile":

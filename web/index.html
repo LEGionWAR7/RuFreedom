@@ -311,6 +311,20 @@
   .scard .fix:hover{background:rgba(245,179,66,.20);border-color:#f5b342}
   .scard .fix[hidden]{display:none}
   .scard .fix:disabled{opacity:.55;cursor:default}
+  /* «подобрать заново» — только для этой группы, поверх прежнего выбора */
+  .scard .redo{grid-column:1/4;margin-top:2px;padding:6px 10px;border-radius:9px;
+    border:1px solid var(--edge2);background:transparent;color:var(--mut);
+    font-size:11.5px;font-weight:600;font-family:inherit;cursor:pointer;
+    pointer-events:auto;display:flex;align-items:center;justify-content:center;
+    gap:7px;transition:background .18s,border-color .18s,color .18s}
+  .scard .redo .ic{width:14px;height:14px;flex:none}
+  .scard .redo:hover:not(:disabled){background:rgba(79,140,255,.12);
+    border-color:var(--accent);color:var(--accent)}
+  .scard .redo:disabled{opacity:.4;cursor:default}
+  .scard .redo[hidden]{display:none}
+  .scard .redo.busy .ic{animation:spin360 .9s linear infinite}
+  @keyframes spin360{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion: reduce){.scard .redo.busy .ic{animation:none}}
   .scard .fix.busy{position:relative;overflow:hidden}
   .scard .fix.busy::after{content:"";position:absolute;inset:0;
     background:linear-gradient(90deg,transparent,rgba(245,179,66,.30),transparent);
@@ -519,6 +533,7 @@
   <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></symbol>
   <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.6 1.6 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.6 1.6 0 0 0-1.8-.3 1.6 1.6 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1A1.6 1.6 0 0 0 9 19.4a1.6 1.6 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.6 1.6 0 0 0 .3-1.8 1.6 1.6 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1A1.6 1.6 0 0 0 4.6 9a1.6 1.6 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.6 1.6 0 0 0 1.8.3H9a1.6 1.6 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.6 1.6 0 0 0 1 1.5 1.6 1.6 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.6 1.6 0 0 0-.3 1.8V9a1.6 1.6 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.6 1.6 0 0 0-1.5 1Z"/></symbol>
   <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20.4 13a8.5 8.5 0 0 1-14.3 4.6L3.6 15.2"/><path d="M3.6 11a8.5 8.5 0 0 1 14.3-4.6l2.5 2.4"/><path d="M20.4 4.2v4.6h-4.6"/><path d="M3.6 19.8v-4.6h4.6"/></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7"/></symbol>
   <symbol id="i-dot" viewBox="0 0 24 24"><path d="m12 4 8 8-8 8-8-8 8-8Z"/></symbol>
 
@@ -541,9 +556,8 @@
     <button class="nav on" id="navHome" title="Главная"><svg class="ic"><use href="#i-home"/></svg></button>
     <button class="nav" id="navTg" title="Telegram — прокси"><svg class="ic"><use href="#i-svc-telegram"/></svg></button>
     <div class="sp"></div>
-    <button class="nav" id="navSet" title="Настройки и о программе"><svg class="ic"><use href="#i-gear"/></svg></button>
     <button class="nav" id="navLog" title="Журнал"><svg class="ic"><use href="#i-list"/></svg></button>
-    <button class="nav" id="navHide" title="Скрыть всё — окно уйдёт в трей"><svg class="ic"><use href="#i-stop"/></svg></button>
+    <button class="nav" id="navSet" title="Настройки и о программе"><svg class="ic"><use href="#i-gear"/></svg></button>
   </div>
 
   <div class="main">
@@ -684,6 +698,9 @@
           <div class="param"><label>Голос Discord (UDP)</label>
             <button class="allsw" id="voiceSw" style="padding:0"><span>обходить</span>
               <span class="toggle" id="voiceToggle"></span></button></div>
+          <div class="param"><label>TTL голосовой подделки</label>
+            <input id="vttl" type="number" min="0" max="64" step="1"
+              title="0 — не трогать: так подделку видит оборудование провайдера на любом расстоянии. Ставь число, только если голос не подключается."></div>
           <div class="param"><label>Игры с античитом</label>
             <button class="allsw" id="acSw" style="padding:0"
               title="Только если игра не стартует: гасит обход целиком">
@@ -846,7 +863,7 @@ const demo = {
   admin:true, state:"idle", running:false,
   strategy:"multisplit", quic:"drop", fooling:"none", split_mode:"pos1",
   fake_ttl:4, fake_count:2, seg_count:2, seqovl:568,
-  all_traffic:false, voice_fake:true, watchdog:true,
+  all_traffic:false, voice_fake:true, voice_ttl:0, watchdog:true,
   diag_running:false, proxy:"", anticheat:[], ac_paused:false, tg_proxy:null,
   tg_searching:false, busy:"", tg_scan:null,
   autostart:false, update: DEMO_UPDATE, conflicts:[], conflict_note:"",
@@ -889,6 +906,8 @@ async function api(name, ...args){
   if (name==="set_group"){ const g=demo.groups.find(x=>x.id===args[0]); if(g) g.enabled=args[1]; return true; }
   if (name==="set_all_traffic"){ demo.all_traffic=args[0]; return true; }
   if (name==="set_voice_fake"){ demo.voice_fake=args[0]; return true; }
+  if (name==="set_voice_ttl"){ demo.voice_ttl=args[0]; return true; }
+  if (name==="retune_group"){ return true; }
   if (name==="set_watchdog"){ demo.watchdog=args[0]; return true; }
   if (name==="set_autostart"){ demo.autostart=args[0]; return true; }
   if (name==="set_pause_on_anticheat"){ demo.pause_on_anticheat=args[0]; return true; }
@@ -984,7 +1003,7 @@ const el = {
   powerIcon:$("powerIcon"), powerLbl:$("powerLbl"), powerSub:$("powerSub"), autoLbl:$("autoLbl"),
   strategy:$("strategy"), quic:$("quic"), fooling:$("fooling"), split:$("split"), ttl:$("ttl"),
   fcount:$("fcount"), segs:$("segs"), ovl:$("ovl"),
-  voiceToggle:$("voiceToggle"), watchToggle:$("watchToggle"),
+  voiceToggle:$("voiceToggle"), watchToggle:$("watchToggle"), vttl:$("vttl"),
   voiceSw:$("voiceSw"), watchSw:$("watchSw"),
   adv:$("adv"), advCaret:$("advCaret"),
   autoCard:$("autoCard"), autoSt:$("autoSt"), autoBest:$("autoBest"), autoBar:$("autoBar"),
@@ -1091,7 +1110,9 @@ function buildServices(st){
       `<b></b><span class="ck"><svg class="ic"><use href="#i-check"/></svg></span>` +
       `<span class="dg" data-v=""></span>` +
       `<span class="prof"><span class="tag" hidden>свой</span><span class="pv"></span></span>` +
-      `<button class="fix" hidden></button>`;
+      `<button class="fix" hidden></button>` +
+      `<button class="redo" hidden><svg class="ic"><use href="#i-refresh"/></svg>` +
+      `<span>Подобрать заново</span></button>`;
     const wrap = b.querySelector(".ic-wrap");
     wrap.style.background = tint(g.accent,.16); wrap.style.color = g.accent;
     b.style.setProperty("--glow", tint(g.accent,.35));
@@ -1101,6 +1122,12 @@ function buildServices(st){
       const on = !b.classList.contains("on");
       b.classList.toggle("on", on);
       api("set_group", g.id, on);
+    };
+    const redo = b.querySelector(".redo");
+    redo.onclick = (e) => {
+      e.stopPropagation();                       // не переключать группу
+      if (redo.disabled) return;
+      Promise.resolve(api("retune_group", g.id)).finally(loop);
     };
     const fix = b.querySelector(".fix");
     fix.onclick = (e) => {
@@ -1140,6 +1167,22 @@ function paintServices(st){
         : (p && !p.broken) ? "Настроить через прокси " + p.host + ":" + p.port
         : relay ? "Нужен WebSocket-мост — найти прокси"
         : "Настроить через прокси");
+    }
+    // «Подобрать заново» — там, где обход вообще применим. У групп, которые
+    // закрыты по IP, подбирать нечего: десинк их не берёт ни одной стратегией.
+    const redo = node.querySelector(".redo");
+    redo.hidden = g.hopeless || all;
+    if (!redo.hidden){
+      const a = st.auto || {};
+      const mine = !!(a.running && (a.matrix||[]).length === 1 &&
+                      a.matrix[0].id === g.id);
+      redo.disabled = running || !!st.busy || !!a.running || !st.admin;
+      redo.classList.toggle("busy", mine);
+      setText(redo.querySelector("span"),
+        mine ? "Подбираю…"
+        : running ? "Сначала выключи обход"
+        : !st.admin ? "Нужны права администратора"
+        : g.tuned ? "Подобрать заново" : "Подобрать для этой группы");
     }
     node.title = g.diag_text
       ? g.title + " — " + g.diag_text + (g.hopeless
@@ -1285,6 +1328,7 @@ function renderState(st){
   if (af!==el.split)    el.split.value    = st.split_mode;
   if (af!==el.ttl)      el.ttl.value      = st.fake_ttl;
   if (af!==el.fcount)   el.fcount.value   = st.fake_count;
+  if (af!==el.vttl)     el.vttl.value     = st.voice_ttl;
   if (af!==el.segs)     el.segs.value     = st.seg_count;
   if (af!==el.ovl)      el.ovl.value      = st.seqovl;
   el.voiceToggle.classList.toggle("on", !!st.voice_fake);
@@ -1428,7 +1472,7 @@ function render(st){
                // плашка «есть новая версия» не появится никогда
                (st.update&&st.update.newer)+"@"+(st.update&&st.update.latest),
                st.state,st.admin,st.strategy,st.quic,st.fooling,st.split_mode,st.fake_ttl,
-               st.fake_count,st.seg_count,st.seqovl,st.voice_fake,st.watchdog,
+               st.fake_count,st.seg_count,st.seqovl,st.voice_fake,st.voice_ttl,st.watchdog,
                st.all_traffic,st.auto.running,st.auto.best,st.auto.status,st.auto.eta,
                st.cats_sig,mxSig,shownState].join("|");
   if (sig!==lastSig){ lastSig = sig; renderState(st); }
@@ -1623,6 +1667,8 @@ el.voiceSw.onclick = () => {
   el.voiceToggle.classList.toggle("on", on);
   api("set_voice_fake", on); lastSig = "";
 };
+el.vttl.onchange = () => { const v=Math.max(0,Math.min(64,parseInt(el.vttl.value)||0));
+                           el.vttl.value=v; api("set_voice_ttl",v); lastSig=""; };
 el.acSw.onclick = () => {
   const on = !el.acToggle.classList.contains("on");
   el.acToggle.classList.toggle("on", on);
@@ -1692,7 +1738,6 @@ el.brOpen.onclick = () => { if(!el.brOpen.disabled) Promise.resolve(api("bridge_
 
 el.navSet.onclick = () => showTab("set");
 el.navLog.onclick = () => showTab("log");
-$("navHide").onclick = () => api("hide_window");
 $("logClear").onclick = () => { el.logPre.textContent = ""; };
 el.devToggle.parentElement.onclick = () => {
   const on = el.devBox.hidden;

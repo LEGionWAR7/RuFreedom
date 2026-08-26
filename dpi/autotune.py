@@ -226,14 +226,24 @@ def test_host_repeat(host: str, tries: int = 2, timeout: float = 4.0) -> bool:
     return True
 
 
-def test_probes(group_ids, timeout: float = 4.0, tries: int = 2) -> Dict[str, bool]:
+def test_probes(group_ids, timeout: float = 4.0, tries: int = 2,
+                extra: Optional[Dict[str, list]] = None) -> Dict[str, bool]:
     """{группа: доступны ли ВСЕ её проверочные хосты}.
 
     Требование «все» намеренно строгое: у Discord и YouTube инфраструктура
     разнесена (шлюз и CDN режут по-разному), и достаточно, чтобы отвалилась
     одна половина, — сервис уже не работает.
+
+    `extra` — имена, замеченные в живом трафике. Постоянные проверочные хосты
+    до всей инфраструктуры не достают: у YouTube видео раздают отдельные
+    машины, у Discord голосовой WebSocket живёт на своём домене. Стратегия,
+    прошедшая проверку только на постоянных хостах, легко оказывается
+    нерабочей там, где это важно.
     """
     targets = probe_targets(group_ids)
+    for gid, hosts in (extra or {}).items():
+        if gid in group_ids:
+            targets += [(gid, h) for h in hosts]
     if not targets:
         return {}
     results: Dict[str, bool] = {gid: True for gid, _ in targets}

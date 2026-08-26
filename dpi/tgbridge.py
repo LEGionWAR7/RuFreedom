@@ -107,11 +107,17 @@ def verify_entry(ip: str, dc: int = 2, timeout: float = 8.0) -> bool:
 
 def find_entries(progress: Optional[Callable[[str, int, int], None]] = None,
                  stop: Optional[threading.Event] = None,
-                 limit: int = 3) -> List[dict]:
+                 limit: int = 3,
+                 on_found: Optional[Callable[[dict], None]] = None) -> List[dict]:
     """Просканировать подсети Telegram и вернуть проверенные точки входа.
 
     Сначала быстрый TCP-проход (адресов тысячи, рукопожатие с каждым было бы
     слишком долго), затем настоящая проверка WebSocket у откликнувшихся.
+
+    Проверка идёт ПАРАЛЛЕЛЬНО. Раньше она шла по одному адресу за раз, а у
+    каждого свой таймаут в восемь секунд — три точки входа набирались почти
+    полминуты, и всё это время человек не видел ничего. Теперь первая же
+    удача уходит в `on_found` сразу, не дожидаясь остальных.
     """
     found: List[dict] = []
     nets = list(TG_NETS)
@@ -123,12 +129,32 @@ def find_entries(progress: Optional[Callable[[str, int, int], None]] = None,
             progress(net, i, len(nets))
         with ThreadPoolExecutor(max_workers=160) as ex:
             alive = [x for x in ex.map(_tcp_open, addrs) if x]
-        for ip in alive:
+        if not alive:
+            continue
+
+        def _check(ip):
             if stop is not None and stop.is_set():
-                break
+                return None
             dc = dc_for_ip(ip)
-            if verify_entry(ip, dc):
-                found.append({"ip": ip, "dc": dc, "net": net})
+            return {"ip": ip, "dc": dc, "net": net} if verify_entry(ip, dc) else None
+
+        with ThreadPoolExecutor(max_workers=min(8, len(alive))) as ex:
+            futs = [ex.submit(_check, ip) for ip in alive]
+            for fut in futs:
+                if stop is not None and stop.is_set():
+                    break
+                try:
+                    item = fut.result()
+                except Exception:            # noqa: BLE001
+                    item = None
+                if item is None:
+                    continue
+                found.append(item)
+                if on_found:
+                    try:
+                        on_found(item)
+                    except Exception:        # noqa: BLE001
+                        pass
                 if len(found) >= limit:
                     return found
     return found

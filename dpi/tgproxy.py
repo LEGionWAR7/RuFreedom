@@ -171,6 +171,58 @@ def find_ws_bridge(host: str = "127.0.0.1") -> Optional[dict]:
     return None
 
 
+def listening_ports(host: str = "127.0.0.1") -> List[int]:
+    """Все локальные TCP-порты, которые кто-то СЛУШАЕТ.
+
+    Угадывать порт по списку известных — заведомо проигрышная игра: у Clash
+    Verge он 7897, у Throne свой, а человек мог поставить любой. Спрашиваем у
+    системы напрямую (GetExtendedTcpTable), и тогда клиент находится, даже
+    если про него никто никогда не слышал.
+
+    Порты ниже 1024 отбрасываем: там системные службы, прокси там не живут.
+    """
+    import ctypes
+    import ctypes.wintypes as wt
+
+    if os.name != "nt":
+        return []
+
+    class _Row(ctypes.Structure):
+        _fields_ = [("dwState", wt.DWORD), ("dwLocalAddr", wt.DWORD),
+                    ("dwLocalPort", wt.DWORD), ("dwRemoteAddr", wt.DWORD),
+                    ("dwRemotePort", wt.DWORD), ("dwOwningPid", wt.DWORD)]
+
+    TCP_TABLE_OWNER_PID_LISTENER = 3
+    AF_INET = 2
+    size = wt.DWORD(0)
+    try:
+        iphlp = ctypes.windll.iphlpapi
+        iphlp.GetExtendedTcpTable(None, ctypes.byref(size), False, AF_INET,
+                                  TCP_TABLE_OWNER_PID_LISTENER, 0)
+        if not size.value:
+            return []
+        buf = ctypes.create_string_buffer(size.value)
+        if iphlp.GetExtendedTcpTable(buf, ctypes.byref(size), False, AF_INET,
+                                     TCP_TABLE_OWNER_PID_LISTENER, 0) != 0:
+            return []
+        count = ctypes.cast(buf, ctypes.POINTER(wt.DWORD))[0]
+        rows = ctypes.cast(ctypes.byref(buf, ctypes.sizeof(wt.DWORD)),
+                           ctypes.POINTER(_Row))
+        out: List[int] = []
+        seen = set()
+        for i in range(count):
+            r = rows[i]
+            # dwLocalPort лежит в сетевом порядке байт в младшем слове
+            port = ((r.dwLocalPort & 0xFF) << 8) | ((r.dwLocalPort >> 8) & 0xFF)
+            if port < 1024 or port in seen:
+                continue
+            seen.add(port)
+            out.append(port)
+        return sorted(out)
+    except Exception:                                 # noqa: BLE001
+        return []
+
+
 def running_clients() -> List[str]:
     """Какие прокси-клиенты запущены — чтобы объяснить, если порт не нашёлся."""
     try:
@@ -220,7 +272,7 @@ def system_proxy_endpoint() -> Optional[Tuple[str, int]]:
         return None
 
 
-def scan(host: str = "127.0.0.1", stop=None) -> Dict:
+def scan(host: str = "127.0.0.1", stop=None, progress=None) -> Dict:
     """Полный поиск. Возвращает найденное, проверенное и объяснение.
 
     {"best": {...} | None, "all": [...], "clients": [...], "scanned": N}
@@ -228,6 +280,9 @@ def scan(host: str = "127.0.0.1", stop=None) -> Dict:
     `stop` — threading.Event: если он взведён, проверка прекращается на
     ближайшем порту. Полное рукопожатие к каждому живому порту идёт секунды,
     и человек должен иметь возможность не ждать их все.
+
+    `progress(сделано, всего, находка)` — вызывается на каждый проверенный
+    порт, чтобы найденное показывалось по ходу, а не одним списком в конце.
     """
     def stopped():
         return bool(stop is not None and stop.is_set())
@@ -239,36 +294,66 @@ def scan(host: str = "127.0.0.1", stop=None) -> Dict:
     found: List[dict] = []
     if bridge:
         found.append(bridge)
+        if progress:
+            try:
+                progress(0, 0, bridge)
+            except Exception:                         # noqa: BLE001
+                pass
 
     ports = list(COMMON_PORTS)
     sysp = system_proxy_endpoint()
     if sysp and sysp[0] in ("127.0.0.1", "localhost") and sysp[1] not in ports:
         ports.append(sysp[1])
+    # Всё, что реально слушает на этой машине. Список известных портов от
+    # этого не отменяется: клиент мог подняться между двумя нашими вызовами.
+    known = set(ports)
+    for extra in listening_ports(host):
+        if extra not in known:
+            known.add(extra)
+            ports.append(extra)
 
     # сперва быстро отсеиваем закрытые порты — так проверка идёт секунды, а не
     # минуты: полноценное рукопожатие к каждому из полусотни портов слишком долго
     with ThreadPoolExecutor(max_workers=64) as ex:
         alive = [p for p, ok in zip(ports, ex.map(lambda p: _listening(p, host), ports)) if ok]
 
-    for port in alive:
-        if stopped():
-            break
-        if bridge and port == bridge["port"]:
-            continue
+    todo = [p for p in alive if not (bridge and p == bridge["port"])]
+
+    def _probe(port: int) -> dict:
         ok, why = probe_socks5(port, host)
         if ok:
-            found.append({"host": host, "port": port, "kind": "socks5",
-                          "note": why, "title": f"SOCKS5 {host}:{port}"})
-            continue
+            return {"host": host, "port": port, "kind": "socks5",
+                    "note": why, "title": f"SOCKS5 {host}:{port}"}
         ok2, why2 = probe_http(port, host)
         if ok2:
-            found.append({"host": host, "port": port, "kind": "http",
-                          "note": why2, "title": f"HTTP-прокси {host}:{port}"})
-            continue
+            return {"host": host, "port": port, "kind": "http",
+                    "note": why2, "title": f"HTTP-прокси {host}:{port}"}
         # порт живой, но не прокси или не пускает — сохраним для объяснения
-        found.append({"host": host, "port": port, "kind": "", "broken": True,
-                      "note": why if "не слушает" not in why else why2,
-                      "title": f"{host}:{port}"})
+        return {"host": host, "port": port, "kind": "", "broken": True,
+                "note": why if "не слушает" not in why else why2,
+                "title": f"{host}:{port}"}
+
+    # Проверяем ПАРАЛЛЕЛЬНО и докладываем о каждой находке сразу. Раньше порты
+    # перебирались по одному, а результат человек видел только в самом конце:
+    # со стороны это выглядело как «висит и ничего не делает».
+    if todo:
+        done = 0
+        with ThreadPoolExecutor(max_workers=min(12, len(todo))) as ex:
+            futs = [ex.submit(_probe, port) for port in todo]
+            for fut in futs:
+                if stopped():
+                    break
+                try:
+                    item = fut.result()
+                except Exception:                     # noqa: BLE001
+                    continue
+                done += 1
+                found.append(item)
+                if progress:
+                    try:
+                        progress(done, len(todo), item)
+                    except Exception:                 # noqa: BLE001
+                        pass
 
     working = [f for f in found if not f.get("broken")]
     # MTProto-мост предпочтительнее: он поднят именно ради Telegram
@@ -299,6 +384,77 @@ def tg_mtproto_link(host: str, port: int, secret: str) -> str:
     from urllib.parse import urlencode
     return "tg://proxy?" + urlencode({"server": host, "port": int(port),
                                       "secret": secret})
+
+
+def telegram_exe() -> Optional[str]:
+    """Путь к Telegram Desktop на этой машине, если он установлен.
+
+    Нужен, чтобы отдать ссылку tg:// программе НАПРЯМУЮ. Через os.startfile
+    Windows показывает свой выбор приложения («Как вы хотите открыть эту
+    ссылку?»), и если это окно свернуть или закрыть, не выбрав ничего, ссылка
+    считается отменённой. Telegram при этом успевает получить отмену на уже
+    открытом диалоге прокси и выключает его — со стороны выглядит так, будто
+    программа сама сбросила настройку.
+    """
+    if os.name != "nt":
+        return None
+    # Сначала спрашиваем систему: какой командой она открывает tg://
+    try:
+        import winreg
+        for root, path in ((winreg.HKEY_CURRENT_USER,
+                            r"Software\Classes	desktop.tg\shell\open\command"),
+                           (winreg.HKEY_CLASSES_ROOT,
+                            r"tdesktop.tg\shell\open\command"),
+                           (winreg.HKEY_CLASSES_ROOT, r"tg\shell\open\command")):
+            try:
+                with winreg.OpenKey(root, path) as key:
+                    cmd, _ = winreg.QueryValueEx(key, "")
+            except OSError:
+                continue
+            exe = _exe_from_command(str(cmd or ""))
+            if exe:
+                return exe
+    except Exception:                                 # noqa: BLE001
+        pass
+    # Не нашлось в реестре — смотрим обычные места установки
+    for base in (os.environ.get("APPDATA"), os.environ.get("LOCALAPPDATA"),
+                 os.environ.get("ProgramFiles"),
+                 os.environ.get("ProgramFiles(x86)")):
+        if not base:
+            continue
+        cand = os.path.join(base, "Telegram Desktop", "Telegram.exe")
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+
+def _exe_from_command(cmd: str) -> Optional[str]:
+    """Вытащить путь к программе из строки запуска реестра."""
+    cmd = cmd.strip()
+    if cmd.startswith('"'):
+        end = cmd.find('"', 1)
+        exe = cmd[1:end] if end > 0 else ""
+    else:
+        exe = cmd.split(" ")[0]
+    exe = os.path.expandvars(exe)
+    return exe if exe and os.path.isfile(exe) else None
+
+
+def open_link(link: str) -> Tuple[bool, str]:
+    """Отдать ссылку tg:// Telegram'у. (получилось, чем именно)"""
+    exe = telegram_exe()
+    if exe:
+        try:
+            import subprocess
+            subprocess.Popen([exe, "--", link], close_fds=True)
+            return True, os.path.basename(exe)
+        except Exception:                             # noqa: BLE001
+            pass
+    try:
+        os.startfile(link)                            # noqa: S606 — ссылка tg://
+        return True, "системный обработчик"
+    except Exception as exc:                          # noqa: BLE001
+        return False, str(exc)
 
 
 def link_for(found: dict) -> str:

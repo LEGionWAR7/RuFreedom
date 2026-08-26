@@ -55,12 +55,15 @@ _IP_CACHE_MAX = 4096
 # сколько UDP-потоков отслеживаем для голосового обхода
 _UDP_FLOW_MAX = 2048
 # первые N пакетов UDP-потока получают подделку, дальше поток не трогаем
-_UDP_FLOW_CUTOFF = 4
+# Сколько первых пакетов потока прикрываем подделкой. У zapret это
+# `--dpi-desync-cutoff=n2`: DPI решает судьбу потока по самому его началу,
+# дальше смотреть уже нечего, и трогать поток незачем.
+_UDP_FLOW_CUTOFF = 2
 
-# Потолок TTL для голосовой подделки. Оборудование, которое режет Discord,
-# стоит у провайдера — это первые хопы. Дальше подделке ехать незачем, а вот
-# доехать до собеседника ей нельзя ни при каких настройках.
-_VOICE_FAKE_TTL = 2
+# Размер голосовой подделки. У zapret это готовый QUIC Initial к
+# www.google.com размером около 1200 байт — столько же занимает настоящий
+# QUIC Initial, и DPI видит ровно то, что привык видеть.
+_VOICE_FAKE_SIZE = 1200
 
 
 class Engine:
@@ -612,39 +615,52 @@ class Engine:
     def _handle_voice(self, pkt, payload: bytes, group: str) -> None:
         """Обход для голосового UDP (Discord).
 
-        DPI решает судьбу потока по его первым пакетам, поэтому подделку шлём
-        только в начале — дальше поток идёт нетронутым и нагрузки не создаёт.
-        Подделка уходит с ЗАВЕДОМО низким TTL — не тем, что подобран для TCP.
-        Разница принципиальная: подбор спокойно выбирает ttl 8, а с ним
-        подделка долетает до голосового сервера Discord и садится на тот же
-        сокет, что и настоящий голос. Сервер отвечает на мусор, клиент видит
-        два разных ответа на определение адреса и не подключается вовсе.
-        С потолком в два хопа подделку видит только оборудование провайдера,
-        ради которого она и нужна, а до сервера она не доезжает никогда.
+        Здесь повторена конфигурация zapret, которой люди пользуются годами:
+        подделка на первых двух пакетах потока, шесть повторов, содержимое —
+        полноразмерный QUIC Initial. Своё было в каждой из трёх мелочей, и
+        каждая по отдельности ломала весь приём.
 
-        И сама подделка — не случайные байты, а синтаксически верный QUIC:
-        если она всё-таки куда-то доедет, её опознают как чужой протокол и
-        молча выбросят, тогда как случайный мусор может случайно совпасть с
-        разбираемым пакетом.
+        ПОЧЕМУ НЕ ЗАЖИМАЕМ TTL. В 1.3.0 стоял потолок в два хопа: логика была
+        та, что подделка не должна доехать до сервера Discord. Логика неверна.
+        Оборудование, которое режет голос, стоит не обязательно на втором
+        хопе — у разных провайдеров оно на разном расстоянии, и с потолком в
+        два хопа подделку просто никто не видел. Приём переставал работать
+        целиком, а выглядело это как «обход не помогает».
+
+        Ронять TTL и не требуется. Подделка — синтаксически верный QUIC, а
+        голосовой сервер Discord ждёт RTP. Даже доехав, она разбору не
+        поддаётся и отбрасывается на первом же байте: у RTP старшие два бита
+        первого байта равны 10, у длинного заголовка QUIC — 11. Спутать их
+        нельзя. Поэтому по умолчанию TTL не трогаем вовсе (voice_ttl = 0), а
+        кому нужно — тот выставит своё число в настройках.
         """
         key = (pkt.dst_addr or "", pkt.dst_port or 0)
         seen = self._udp_flows.get(key, 0)
-        if seen < _UDP_FLOW_CUTOFF:
-            self._udp_flows[key] = seen + 1
-            self._udp_flows.move_to_end(key)
-            while len(self._udp_flows) > _UDP_FLOW_MAX:
-                self._udp_flows.popitem(last=False)
-            prof = self.cfg.profile_for(group)
-            header_len = len(pkt.raw) - len(payload)
-            header = bytes(pkt.raw[:header_len])
-            self.stats["quic"] += 1
-            self._note("voice", f"[+] UDP {key[1]} [{group}] -> подделка перед голосом")
+        if seen >= _UDP_FLOW_CUTOFF:
+            self._w.send(pkt)
+            return
+
+        self._udp_flows[key] = seen + 1
+        self._udp_flows.move_to_end(key)
+        while len(self._udp_flows) > _UDP_FLOW_MAX:
+            self._udp_flows.popitem(last=False)
+
+        prof = self.cfg.profile_for(group)
+        header_len = len(pkt.raw) - len(payload)
+        header = bytes(pkt.raw[:header_len])
+        ttl = prof.voice_ttl if prof.voice_ttl > 0 else None
+        repeats = max(1, min(16, prof.voice_repeats))
+        self.stats["quic"] += 1
+        self._note("voice", f"[+] UDP {key[1]} [{group}] -> подделка перед голосом "
+                            f"(x{repeats}"
+                            + (f", ttl {ttl}" if ttl else ", свой TTL") + ")")
+        for _ in range(repeats):
             try:
                 self._w.send(self._build(pkt, header,
-                                         fakes.quic_fake(len(payload)),
-                                         ttl=min(prof.fake_ttl, _VOICE_FAKE_TTL)))
+                                         fakes.quic_fake(_VOICE_FAKE_SIZE),
+                                         ttl=ttl))
             except Exception:
-                pass
+                break
         self._w.send(pkt)
 
     # -- IP-фрагментация (для QUIC) ----------------------------------------

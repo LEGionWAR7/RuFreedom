@@ -29,6 +29,8 @@ _DEFAULTS: Dict[str, Any] = {
     "groups": {},              # {"discord": True, ...}
     "profiles": {},            # {"discord": {...}, ...} — свой обход на группу
     "voice_fake": True,        # обход для голосовых каналов Discord (UDP)
+    "voice_ttl": 0,            # TTL голосовой подделки; 0 — не трогать
+    "voice_repeats": 6,        # сколько раз повторить голосовую подделку
     "categories": {},          # старый ключ, пишем ещё релиз ради отката
     "start_minimized": False,
     "click_sound": "Нажатие кнопки",
