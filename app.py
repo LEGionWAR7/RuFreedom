@@ -18,6 +18,7 @@ import json
 import os
 import pathlib
 import socket
+import ssl
 import sys
 import threading
 import time
@@ -27,7 +28,7 @@ import webview
 
 from dpi import (anticheat, autotune, config as config_mod, diagnose, services,
                  settings_store, tgbridge, tgproxy)
-from dpi import autostart, conflicts, update
+from dpi import autostart, conflicts, protocols, update
 from dpi.config import Config, Profile
 from dpi.engine import Engine
 
@@ -70,6 +71,19 @@ WATCH_COOLDOWN = 3600.0
 SEEN_HOSTS_TTL = 6 * 3600
 
 SCAN_TIMEOUT = 3.0
+# Ниже этого не опускаемся, даже если сеть очень быстрая: обход добавляет
+# переупорядоченные сегменты, и сервер иногда ждёт лишний круг.
+SCAN_TIMEOUT_MIN = 1.2
+# Во сколько раз ждём дольше, чем занимает заведомо успешное рукопожатие.
+SCAN_MARGIN = 6
+# Сколько проверенных комбинаций перепроверить не спеша, если группа не нашла
+# вообще ничего. Только начало списка: там лежат проверенные временем связки,
+# и если уж где-то мы поторопились, то именно там это стоит исправить.
+SECOND_PASS = 20
+# Что стоит одна проверка сверх ожидания ответа: подмена профиля и разбор.
+# Раньше сюда входили ещё и открытие с закрытием драйвера — теперь движок
+# на весь перебор один.
+SWEEP_OVERHEAD = 0.25
 # Там, где решается судьба стратегии (подтверждение и финал), спешить нельзя:
 # лишняя секунда стоит дёшево, ошибочно забракованный победитель — дорого.
 CHECK_TIMEOUT = 4.0
@@ -98,9 +112,106 @@ def relaunch_as_admin() -> None:
             None, "runas", sys.executable, f'"{script}"', None, 1)
 
 
+def _client_hello(host: str) -> bytes:
+    """Настоящий ClientHello для имени — без единого пакета в сеть.
+
+    Нужен, чтобы посчитать точки разреза заранее и понять, какие комбинации
+    на самом деле неразличимы.
+    """
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        inb, outb = ssl.MemoryBIO(), ssl.MemoryBIO()
+        obj = ctx.wrap_bio(inb, outb, server_hostname=host)
+        try:
+            obj.do_handshake()
+        except Exception:                             # noqa: BLE001
+            pass
+        return outb.read()
+    except Exception:                                 # noqa: BLE001
+        return b""
+
+
 def res_base() -> str:
     """Папка с ресурсами: _MEIPASS в собранном exe, иначе рядом со скриптом."""
     return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
+
+class Sweep:
+    """Один движок WinDivert на весь перебор вместо перезапуска на кандидата.
+
+    Раньше каждая проверка поднимала и гасила драйвер заново: открыть, дождаться
+    готовности, поспать, померить, закрыть, дождаться потока, поспать. На
+    двухстах кандидатах это складывается в минуты чистых накладных расходов —
+    и заодно двести раз дёргает драйвер, который от этого не становится
+    здоровее.
+
+    Держать движок открытым можно, потому что от стратегии зависит только то,
+    ЧТО он делает с пакетом: профиль читается заново на каждом пакете
+    (`cfg.profile_for`). Строка фильтра, диапазоны UDP и режим QUIC считаются
+    один раз при запуске и от кандидата не зависят — они берутся из настроек,
+    общих для всего перебора. Значит достаточно подменить профили.
+
+    Список ХОСТОВ тоже фиксируется при запуске, поэтому он задаётся сразу
+    самым широким: все группы перебора плюс подсмотренные имена.
+    """
+
+    def __init__(self, groups, quic_mode: str, cover=None, logger=None):
+        self.groups = list(groups)
+        self._log = logger or (lambda *_: None)
+        cfg = Config()
+        cfg.quic_mode = quic_mode
+        cfg.host_groups = {host: gid
+                           for gid, host in autotune.probe_targets(self.groups)}
+        for gid, hosts in (cover or {}).items():
+            if gid in self.groups:
+                for host in hosts:
+                    cfg.host_groups.setdefault(host, gid)
+        cfg.hosts = set(cfg.host_groups)
+        cfg.profiles = {}
+        self.cfg = cfg
+        self.engine = None
+        self.thread = None
+        self.error = ""
+
+    @property
+    def hosts(self):
+        return list(self.cfg.host_groups)
+
+    def start(self) -> bool:
+        """Поднять движок. False — драйвер не открылся, причина в .error."""
+        self.stop()
+        eng = Engine(self.cfg, logger=lambda *_: None)
+        th = threading.Thread(target=eng.run, daemon=True, name="rz-sweep")
+        th.start()
+        eng.ready.wait(timeout=5)         # взводится и при успехе, и при провале
+        if not eng.running:
+            self.error = eng.error or "причина неизвестна"
+            self.engine, self.thread = None, None
+            return False
+        self.engine, self.thread = eng, th
+        self.error = ""
+        return True
+
+    def alive(self) -> bool:
+        eng = self.engine
+        return bool(eng is not None and eng.running)
+
+    def use(self, profile) -> None:
+        """Поставить стратегию всем группам перебора."""
+        self.cfg.profiles = {gid: profile for gid in self.groups}
+
+    def stop(self) -> None:
+        eng, th = self.engine, self.thread
+        self.engine, self.thread = None, None
+        if eng is not None:
+            try:
+                eng.stop()
+            except Exception:                         # noqa: BLE001
+                pass
+        if th is not None:
+            th.join(timeout=4)
 
 
 class Api:
@@ -734,6 +845,12 @@ class Api:
             self.auto["status"] = "Ошибка автоподбора"
             self._logput(f"[!] Автоподбор: {exc}")
         finally:
+            # Движок перебора живёт весь перебор целиком, поэтому гасим его
+            # здесь: этот finally отрабатывает и при отмене, и при ошибке.
+            sweep = getattr(self, "_sweep", None)
+            if sweep is not None:
+                sweep.stop()
+                self._sweep = None
             with self._lock:
                 # отставший воркер не должен снимать флаг с более нового запуска
                 if gen == self._auto_gen:
@@ -788,10 +905,33 @@ class Api:
                                    else "Всё и так открывается — обход не нужен")
             return 0
 
+        cover = self._probe_extra()
+        sweep = Sweep(pending, self.s["quic_mode"], cover)
+        self._sweep = sweep               # гасится в _auto_worker
+
+        # 1. Разрешить имена заранее. На холодную DNS занимает до секунды, и
+        #    внутри проверки это выглядит как «сервер долго думал» — из-за
+        #    чего таймаут и приходилось держать с запасом.
+        self.auto["status"] = "Готовлюсь: разрешаю имена…"
+        autotune.warm_dns(sweep.hosts + [autotune.CONTROL_HOST])
+
+        # 2. Замерить, сколько на ЭТОЙ сети занимает заведомо успешное
+        #    рукопожатие, и от него назначить таймаут перебора.
+        scan_timeout = self._scan_timeout()
+
+        # 3. Собрать план и выбросить из него близнецов.
         # полный план: сперва проверенные комбинации, затем сетка добора.
         # Без сетки подбор упирался в список и сдавался — а youtubei
         # берётся только ею.
         combos = autotune.all_candidates(self._known_good())
+        before = len(combos)
+        combos = self._dedupe_plan(combos, sweep.hosts)
+        per = scan_timeout + SWEEP_OVERHEAD
+        self._logput(
+            f"[*] План: {len(combos)} проверок "
+            f"(одинаковых отсеяно: {before - len(combos)}), таймаут "
+            f"{scan_timeout:.1f} с, полный перебор — до "
+            f"{max(1, int(len(combos) * per / 60))} мин.")
         finalists: dict = {}          # {группа: [прошедшие комбинации]}
         first_hit: dict = {}          # {группа: номер её первой удачи}
         won = {}
@@ -814,12 +954,13 @@ class Api:
             if not pending:
                 break
             self.auto["progress"] = max(0.03, i / len(combos))
-            self.auto["eta"] = autotune.eta_seconds(len(pending), i, len(combos))
+            self.auto["eta"] = (int((len(combos) - i) * per) if pending else 0)
             self.auto["status"] = f"Проверяю: {combo['label']} ({i + 1}/{len(combos)})"
             for gid in pending:
                 self._mx(gid, "test")
 
-            ok, opened = self._test_candidate(combo, pending, timeout=SCAN_TIMEOUT)
+            ok, opened = self._test_candidate(combo, pending,
+                                              timeout=scan_timeout, sweep=sweep)
             if not opened:
                 open_fails += 1
                 # проблема с драйвером, а не со стратегией: две минуты молчаливых
@@ -864,7 +1005,7 @@ class Api:
             # отсеивают.
             ok2, opened2 = self._test_candidate(combo, maybe, tries=3,
                                                 timeout=CHECK_TIMEOUT,
-                                                cover=self._probe_extra())
+                                                cover=cover, sweep=sweep)
 
             hit, flaky = [], []
             for gid in maybe:
@@ -893,6 +1034,21 @@ class Api:
                 self._logput(f"[~] {combo['label']} -> у {', '.join(flaky)} "
                              "не подтвердилось, ищу дальше.")
 
+        # Второй заход для тех, у кого пусто. Перебор шёл с таймаутом по
+        # замеру сети; если мы всё же поторопились, потерять могли только
+        # медленно отвечающего кандидата — а такой скорее найдётся в начале
+        # списка, среди проверенных временем связок.
+        empty = [gid for gid in targets
+                 if not finalists.get(gid)
+                 and verdicts.get(gid) != "ok"
+                 and not diagnose.hopeless(verdicts.get(gid, "unknown"))]
+        if empty and not self._auto_stop.is_set() and gen == self._auto_gen:
+            self._second_pass(empty, combos, finalists, first_hit, sweep, gen)
+
+        # Финал считает очки своим движком с другим набором имён — общий
+        # больше не нужен, и держать драйвер открытым просто так незачем.
+        sweep.stop()
+        self._sweep = None
         won = self._playoff(finalists, gen)
 
         for gid in pending:
@@ -976,6 +1132,126 @@ class Api:
             settings_store.save(self.s)
             self._logput(f"[*] {services.title(gid)}: «{combo['label']}» "
                          f"закреплён — прервёшь подбор, он останется.")
+
+    def _second_pass(self, groups, combos, finalists, first_hit, sweep, gen) -> None:
+        """Ещё раз по началу списка, уже без спешки.
+
+        Нужен ровно затем, чтобы быстрый перебор можно было держать быстрым.
+        Цена — полторы минуты, и только в случае, когда всё равно не нашлось
+        ничего и человек иначе остался бы ни с чем.
+        """
+        head = [c for c in combos if not c.get("grid")][:SECOND_PASS]
+        if not head:
+            return
+        self._logput(f"[*] Ничего не пробило. Перепроверяю {len(head)} связок "
+                     f"не спеша (таймаут {CHECK_TIMEOUT} с) — вдруг стратегия "
+                     f"рабочая, просто отвечает медленно.")
+        pending = list(groups)
+        for gid in pending:
+            self._mx(gid, "test")
+        for i, combo in enumerate(head):
+            if not pending or self._auto_stop.is_set() or gen != self._auto_gen:
+                break
+            self.auto["status"] = (f"Второй заход: {combo['label']} "
+                                   f"({i + 1}/{len(head)})")
+            ok, opened = self._test_candidate(combo, pending, tries=2,
+                                              timeout=CHECK_TIMEOUT, sweep=sweep)
+            if not opened:
+                return
+            maybe = [g for g in pending if ok.get(g)]
+            if not maybe:
+                continue
+            # Контрольный прогон обязателен и здесь. Второй заход существует
+            # ради терпения, а не ради снисходительности: одна удачная
+            # проверка случается и без обхода, и раньше подбор на это
+            # покупался — «подобранный» сервис работал через раз.
+            ok2, opened2 = self._test_candidate(combo, maybe, tries=3,
+                                                timeout=CHECK_TIMEOUT, sweep=sweep)
+            if not opened2:
+                return
+            for gid in [g for g in maybe if ok2.get(g)]:
+                finalists.setdefault(gid, []).append(combo)
+                first_hit.setdefault(gid, 10 ** 6)
+                self._pin_profile(gid, combo)
+                self._mx(gid, "ok", combo["label"])
+                pending.remove(gid)
+                self._logput(f"[*] {services.title(gid)}: со вторым заходом "
+                             f"подошло «{combo['label']}».")
+        for gid in pending:
+            self._mx(gid, "fail", "не пробило ничем")
+
+    def _scan_timeout(self) -> float:
+        """Таймаут одной проверки — по замеру этой сети, а не «на всякий случай».
+
+        Заблокированный хост не отвечает отказом, он молчит до упора. Значит
+        таймаут и есть цена одной неудачной проверки, а неудачных в переборе
+        подавляющее большинство: именно он определяет, двадцать минут пойдёт
+        подбор или восемь.
+
+        Держать его фиксированным приходилось из-за неизвестности: сеть может
+        быть медленной. Но её несложно измерить. Замер берётся по заведомо
+        незаблокированному хосту, с шестикратным запасом — этого хватает и на
+        переупорядоченные сегменты, которые сервер иногда ждёт лишний круг.
+        А на случай, если запаса всё же не хватило, есть второй заход:
+        группа, не нашедшая ничего, перепроверяется по началу списка уже без
+        спешки (см. _second_pass).
+        """
+        base = 0.0
+        try:
+            base = autotune.baseline_latency()
+        except Exception:                             # noqa: BLE001
+            base = 0.0
+        if base <= 0:
+            # замерить не вышло (нет сети?) — остаёмся на прежнем значении
+            self._logput("[*] Скорость сети замерить не удалось, "
+                         f"таймаут проверки прежний: {SCAN_TIMEOUT} с.")
+            return SCAN_TIMEOUT
+        want = max(SCAN_TIMEOUT_MIN, min(SCAN_TIMEOUT, base * SCAN_MARGIN))
+        self._logput(f"[*] Рукопожатие на этой сети занимает {base:.2f} с — "
+                     f"жду ответа {want:.1f} с вместо {SCAN_TIMEOUT}.")
+        return want
+
+    def _dedupe_plan(self, combos, hosts) -> list:
+        """Выбросить комбинации, которые дают ОДИНАКОВЫЕ пакеты.
+
+        Точка разреза считается от имени сайта, и разные подписи нередко
+        сходятся в одно и то же место: «первая буква имени» и «начало имени
+        плюс один» — это буквально один и тот же байт. Проверять обе — значит
+        дважды ждать один и тот же таймаут.
+
+        Сравниваем не подписи, а результат: техника, обман, подделки и
+        посчитанные точки разреза на НАСТОЯЩИХ проверочных именах.
+        """
+        try:
+            probe = Engine(Config(), logger=lambda *_: None)
+            hellos = []
+            for host in hosts[:8]:
+                payload = _client_hello(host)
+                span = protocols.find_sni(payload) if payload else None
+                if span:
+                    hellos.append((host, payload, span[0], span[1]))
+            if not hellos:
+                return list(combos)
+        except Exception:                             # noqa: BLE001
+            return list(combos)
+
+        out, seen = [], set()
+        for combo in combos:
+            try:
+                prof = autotune.candidate_to_profile(combo)
+                cuts = tuple(
+                    tuple(probe._positions(a, b, len(pl), prof, host))
+                    for host, pl, a, b in hellos)
+                key = (prof.strategy, prof.fooling, prof.fake_ttl, prof.fake_count,
+                       prof.seqovl, prof.ip_id_zero, prof.fake_sni, cuts)
+            except Exception:                         # noqa: BLE001
+                out.append(combo)
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(combo)
+        return out
 
     def _known_good(self) -> list:
         """Комбинации, которые уже работали на этой машине, — первыми в очередь.
@@ -1070,40 +1346,38 @@ class Api:
             time.sleep(0.1)
 
     def _test_candidate(self, combo, groups, tries=2, timeout=CHECK_TIMEOUT,
-                        cover=None):
+                        cover=None, sweep=None):
         """Прогнать одну комбинацию на проверочных хостах групп.
 
         Возвращает ({группа: пробило}, открылся ли драйвер). Второе важно
         отдельно: если WinDivert не открылся, все False означают не «не
         пробило», а «проверка не состоялась».
+
+        `sweep` — общий движок перебора. С ним драйвер не трогается вовсе:
+        достаточно подменить профиль. Без него (одиночный вызов, тесты)
+        поднимается свой на одну проверку, как раньше.
         """
         prof = autotune.candidate_to_profile(combo, quic_mode=self.s["quic_mode"])
-        cfg = Config()
-        cfg.host_groups = {host: gid for gid, host in autotune.probe_targets(groups)}
-        # `cover` — только чтобы движок накрыл обходом и эти имена. В зачёт
-        # они не идут: см. пояснение на месте вызова.
-        for gid, hosts in (cover or {}).items():
-            if gid in groups:
-                for h in hosts:
-                    cfg.host_groups.setdefault(h, gid)
-        cfg.hosts = set(cfg.host_groups)
-        cfg.profiles = {gid: prof for gid in groups}
-        eng = Engine(cfg, logger=lambda *_: None)
-        th = threading.Thread(target=eng.run, daemon=True, name="rz-probe")
-        th.start()
-        eng.ready.wait(timeout=5)         # взводится и при успехе, и при провале
-        opened = eng.running
-        try:
-            if not opened:
-                # Причину знает только движок. Без неё «драйвер не открылся»
-                # ничего не говорит человеку, который сидит далеко.
-                self._last_open_error = eng.error or "причина неизвестна"
+        if sweep is not None:
+            if not sweep.alive() and not sweep.start():
+                self._last_open_error = sweep.error
                 return {}, False
+            sweep.use(prof)
+            time.sleep(0.05)              # дать смене профиля дойти до потока
+            return autotune.test_probes(groups, timeout, tries), True
+
+        own = Sweep(groups, self.s["quic_mode"], cover)
+        if not own.start():
+            # Причину знает только движок. Без неё «драйвер не открылся»
+            # ничего не говорит человеку, который сидит далеко.
+            self._last_open_error = own.error
+            return {}, False
+        try:
+            own.use(prof)
             time.sleep(0.1)
             return autotune.test_probes(groups, timeout, tries), True
         finally:
-            eng.stop()
-            th.join(timeout=4)
+            own.stop()
             time.sleep(0.1)
 
     def run_diagnose(self, progress=None):

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
@@ -198,10 +199,16 @@ def grid_candidates() -> List[Dict]:
     Раньше порядок был обратный (сначала все сегменты одной стратегии), и до
     второй стратегии перебор доходил только на 61-й проверке — четыре минуты
     впустую, если ответ лежал именно там.
+
+    Перекрытие подставным ClientHello теперь идёт РАНЬШЕ числа сегментов, и
+    это не вкусовщина: перекрытие — отдельный приём, а число сегментов всего
+    лишь его настройка. В проверенном списке перекрытие выигрывает чаще
+    всего. Раньше до него доходили только на 121-й проверке, перебрав все
+    сегменты без него; теперь — на 31-й.
     """
     out: List[Dict] = []
-    for ovl in GRID_OVERLAPS:
-        for segs in GRID_SEGMENTS:
+    for segs in GRID_SEGMENTS:
+        for ovl in GRID_OVERLAPS:
             for strat in GRID_STRATEGIES:
                 for split in GRID_SPLITS:
                     tail = f" +перекрытие" if ovl else ""
@@ -286,6 +293,51 @@ def score_probes(group_ids, timeout: float = 4.0, rounds: int = 3,
             if ok:
                 out[gid][0] += 1
     return {gid: (v[0], v[1]) for gid, v in out.items()}
+
+
+def warm_dns(hosts) -> None:
+    """Разрешить имена заранее, до начала перебора.
+
+    Первое обращение к имени включает в себя запрос к DNS, а он на холодную
+    занимает до секунды. Внутри проверки кандидата это выглядит как «медленно
+    ответил сервер» и съедает запас времени, из-за которого приходится
+    держать таймаут большим. Разрешаем всё разом и заранее — дальше отвечает
+    кэш, и замеры становятся ровными.
+    """
+    uniq = []
+    for host in hosts:
+        if host and host not in uniq:
+            uniq.append(host)
+    if not uniq:
+        return
+    def _one(host):
+        try:
+            socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+        except Exception:                             # noqa: BLE001
+            pass
+    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(uniq))) as ex:
+        list(ex.map(_one, uniq))
+
+
+def baseline_latency(tries: int = 3, timeout: float = 4.0) -> float:
+    """Сколько на этой сети занимает ЗАВЕДОМО успешное рукопожатие.
+
+    Нужна, чтобы не держать таймаут перебора «на всякий случай» большим.
+    Заблокированный хост не отвечает отказом — он молчит до упора, поэтому
+    таймаут и есть цена одной неудачной проверки, а неудачных большинство.
+    Зная, что успех укладывается в 0.2 секунды, ждать три бессмысленно.
+
+    Берём максимум из нескольких замеров, а не среднее: нас интересует
+    худший случай, а не типичный. Ноль — значит замерить не удалось.
+    """
+    warm_dns([CONTROL_HOST])
+    best = 0.0
+    for _ in range(max(1, tries)):
+        t0 = time.monotonic()
+        if not test_host(CONTROL_HOST, timeout):
+            continue
+        best = max(best, time.monotonic() - t0)
+    return best
 
 
 def internet_alive(timeout: float = 4.0) -> bool:
