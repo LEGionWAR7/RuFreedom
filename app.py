@@ -28,7 +28,7 @@ import webview
 
 from dpi import (anticheat, autotune, config as config_mod, diagnose, services,
                  settings_store, tgbridge, tgproxy)
-from dpi import autostart, conflicts, protocols, update
+from dpi import autostart, conflicts, protocols, tempclean, update, voicecheck
 from dpi.config import Config, Profile
 from dpi.engine import Engine
 
@@ -231,6 +231,7 @@ class Api:
         self.ac_found: list = []
         self.ac_paused = False
         # локальный SOCKS5 для Telegram: его блокировку по IP обход не решает
+        self.voice: dict = {}
         self.tg_proxy: dict | None = None
         self.tg_scan: dict | None = None
         self.tg_searching = False
@@ -469,6 +470,7 @@ class Api:
             "seg_count": self.s["seg_count"],
             "seqovl": self.s["seqovl"],
             "all_traffic": self.s["all_traffic"],
+            "voice": dict(self.voice),
             "voice_fake": self.s["voice_fake"],
             "voice_ttl": self.s["voice_ttl"],
             "voice_repeats": self.s["voice_repeats"],
@@ -661,6 +663,11 @@ class Api:
                 pass
             if th is not None:
                 th.join(timeout=4)
+        # Дать драйверу выгрузиться, прежде чем закрываться. Служба WinDivert
+        # прописана ВНУТРЬ распакованной папки программы, и пока драйвер
+        # загружен, Windows держит её файл — папка не удаляется, а на выходе
+        # вылезает «Failed to remove temporary directory».
+        tempclean.wait_driver_gone(2.5)
 
     def elevate(self):
         self.shutdown()
@@ -775,8 +782,15 @@ class Api:
                 return self._auto_refuse(
                     "Идёт поиск прокси для Telegram — он забивает сеть, и замеры "
                     "подбора будут врать. Дождись его или отмени.")
-            if self.state != "idle":
-                return self._auto_refuse("Сначала выключи обход, потом подбирай.")
+            if self.state in ("starting", "stopping"):
+                return self._auto_refuse(
+                    "Обход сейчас переключается — дай ему секунду и повтори.")
+            # Обход выключаем САМИ и включаем обратно в конце. Раньше здесь был
+            # отказ «сначала выключи обход»: человек выключал, подбирал и
+            # оставался с выключенным обходом, гадая, почему ничего не
+            # работает. Драйвер всё равно нужен подбору одному, но помнить об
+            # этом должна программа, а не человек.
+            restore = (self.state == "running")
             if not is_admin():
                 return self._auto_refuse(
                     "Нужны права администратора: закрой программу и запусти "
@@ -796,11 +810,32 @@ class Api:
                             "icon": services.GROUPS[g]["icon"],
                             "state": "wait", "label": ""} for g in targets],
             })
-            self._auto_thread = threading.Thread(target=self._auto_worker,
-                                                 args=(gen, list(targets), by_user),
-                                                 daemon=True, name="rz-auto")
+            self._auto_thread = threading.Thread(
+                target=self._auto_worker,
+                args=(gen, list(targets), by_user, restore),
+                daemon=True, name="rz-auto")
             self._auto_thread.start()
         return True
+
+    def voice_report(self, quiet: bool = False) -> dict:
+        """Готов ли Discord к голосу и демонстрации экрана.
+
+        Снаружи можно проверить только инфраструктуру: адрес голосового
+        сервера выдаётся под сессию, уже после входа в канал. Поэтому здесь
+        честно — «шлюз и голосовые серверы открываются, клиент запущен, RPC
+        отвечает», а не «звук точно пойдёт».
+        """
+        try:
+            state = voicecheck.report()
+        except Exception as exc:                     # noqa: BLE001
+            return {"ok": False, "text": f"Проверить не вышло: {exc}"}
+        self.voice = dict(state)
+        if not quiet:
+            self._logput("[*] Discord: " + state["text"])
+            if state.get("rpc"):
+                self._logput(f"    Клиент отвечает на 127.0.0.1:{state['rpc']} — "
+                             f"игры и оверлеи его видят.")
+        return state
 
     def retune_group(self, gid):
         """Подобрать обход заново для ОДНОЙ группы, поверх прежнего выбора.
@@ -837,9 +872,12 @@ class Api:
                     row["label"] = label
                 break
 
-    def _auto_worker(self, gen, targets, by_user=True):
+    def _auto_worker(self, gen, targets, by_user=True, restore=False):
         won = 0
         try:
+            if restore and not self._pause_bypass():
+                self.auto["status"] = "Не удалось выключить обход для подбора"
+                return
             won = self._tune_groups(gen, targets)
         except Exception as exc:  # noqa: BLE001
             self.auto["status"] = "Ошибка автоподбора"
@@ -855,7 +893,16 @@ class Api:
                 # отставший воркер не должен снимать флаг с более нового запуска
                 if gen == self._auto_gen:
                     self.auto["running"] = False
-        if won and gen == self._auto_gen:
+        if gen != self._auto_gen:
+            return
+        if restore:
+            # Обход был включён до подбора — возвращаем как было, независимо
+            # от того, нашлось что-нибудь или нет. Это ровно та кнопка,
+            # которую человек уже нажимал; выключили её мы сами.
+            self._logput("[*] Возвращаю обход в то состояние, в котором он был "
+                         "до подбора.")
+            self.start()
+        elif won:
             if by_user:
                 self._autostart_after_tune()
             else:
@@ -1097,11 +1144,37 @@ class Api:
                 self.auto["status"] = "Ничего не пробило — попробуй вручную"
                 self._logput("[!] Автоподбор ничего не пробил.")
 
+        # Если среди подобранного был Discord — сразу сказать, что с голосом.
+        # Иначе человек видит «Discord = такая-то стратегия» и всё равно не
+        # знает, заработает ли демонстрация экрана.
+        if "discord" in targets and gen == self._auto_gen:
+            self.voice_report()
+
         self.s["auto_tuned"] = True
         settings_store.save(self.s)
         self.auto["progress"] = 1.0
         self.auto["eta"] = 0
         return len(won)
+
+    def _pause_bypass(self, wait: float = 8.0) -> bool:
+        """Погасить обход и дождаться, пока драйвер действительно освободится.
+
+        Ждать обязательно: WinDivert держит один хозяин, и подбор, начатый
+        раньше времени, упрётся в «драйвер не открывается» — причём выглядеть
+        это будет как поломка, а не как спешка.
+        """
+        self._logput("[*] Выключаю обход на время подбора — драйвер нужен "
+                     "ему одному.")
+        self.stop()
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            with self._lock:
+                if self.state == "idle":
+                    return True
+            time.sleep(0.1)
+        self._logput("[!] Обход не выключился за отведённое время — подбор "
+                     "отменён, чтобы не мешать самому себе.")
+        return False
 
     def _autostart_after_tune(self):
         """Включить обход сразу после подбора, который запросил человек.
@@ -1538,7 +1611,7 @@ class Api:
             done.set()
 
         threading.Thread(target=_quit, daemon=True, name="rz-quit").start()
-        done.wait(4.0)
+        done.wait(6.5)
         os._exit(0)
 
     def dismiss_update(self):
@@ -2264,6 +2337,17 @@ def main() -> int:
 
     # прошлый exe, отодвинутый при обновлении, больше не нужен
     update.cleanup_old()
+
+    # Папки прошлых запусков, которые не удалось удалить при выходе: их держал
+    # загруженный драйвер. Каждая весит десятки мегабайт, и без уборки они
+    # копятся неделями.
+    try:
+        gone, freed = tempclean.sweep()
+        if gone:
+            api._logput(f"[*] Убрано папок от прошлых запусков: {gone} "
+                        f"({freed // (1024 * 1024)} МБ).")
+    except Exception:                                 # noqa: BLE001
+        pass
 
     def on_start():
         if _tray is not None:

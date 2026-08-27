@@ -111,7 +111,14 @@ GROUPS["discord"] = {
     "title": "Discord",
     "icon": "i-svc-discord",
     "accent": "#5865f2",
-    "probe": ["discord.com", "gateway.discord.gg"],
+    # Проверять только discord.com и шлюз было мало: оба в России открываются,
+    # группа получала вердикт «не заблокирован» и выпадала из обхода целиком —
+    # вместе с голосом, который живёт на СВОЁМ домене и проверен не был.
+    # Отсюда и «Discord не подбирается с первого раза»: подбирать было нечего.
+    #   latency.discord.media — узел голосовой инфраструктуры, имя постоянное;
+    #   cdn.discordapp.com    — картинки и вложения, то самое «не прогружается».
+    "probe": ["discord.com", "gateway.discord.gg",
+              "latency.discord.media", "cdn.discordapp.com"],
     "domains": [
         "discord.com", "discord.gg", "discordapp.com", "discordapp.net",
         "discord.media", "discord.gift", "dis.gd", "discordcdn.com",

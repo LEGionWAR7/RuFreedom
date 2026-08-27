@@ -1176,12 +1176,13 @@ function paintServices(st){
       const a = st.auto || {};
       const mine = !!(a.running && (a.matrix||[]).length === 1 &&
                       a.matrix[0].id === g.id);
-      redo.disabled = running || !!st.busy || !!a.running || !st.admin;
+      redo.disabled = (st.state==="starting"||st.state==="stopping")
+                      || !!st.busy || !!a.running || !st.admin;
       redo.classList.toggle("busy", mine);
       setText(redo.querySelector("span"),
         mine ? "Подбираю…"
-        : running ? "Сначала выключи обход"
         : !st.admin ? "Нужны права администратора"
+        : running ? "Подобрать заново (обход вернётся сам)"
         : g.tuned ? "Подобрать заново" : "Подобрать для этой группы");
     }
     node.title = g.diag_text
@@ -1343,7 +1344,9 @@ function renderState(st){
   const lock = st.state!=="idle";
   [el.strategy,el.quic,el.fooling,el.split,el.ttl,el.fcount,el.segs,el.ovl].forEach(n=>n.disabled=lock);
   el.voiceSw.disabled = lock;
-  el.autobtn.disabled = lock || !!st.busy;
+  // Обход подбор гасит и возвращает сам, поэтому включённый обход кнопку
+  // больше не блокирует. Переключение (starting/stopping) — блокирует.
+  el.autobtn.disabled = (st.state==="starting"||st.state==="stopping") || !!st.busy;
   el.autobtn.classList.toggle("busy", !!st.auto.running);
   const tuning = !!st.auto.running;
   if (el.autoStop.hidden === tuning) el.autoStop.hidden = !tuning;
