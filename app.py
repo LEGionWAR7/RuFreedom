@@ -1452,13 +1452,26 @@ class Api:
                 self._logput(f"[*] Найден {best['title']} — {best['note']}. "
                              f"Нажми «Настроить Telegram».")
             else:
-                self._logput(f"[!] Рабочего прокси нет. Проверено портов: "
-                             f"{res.get('scanned', 0)}, откликнулось "
-                             f"{res.get('alive', 0)}.")
+                self._logput(f"[!] Рабочего прокси нет. Проверено пар "
+                             f"адрес-порт: {res.get('scanned', 0)}, "
+                             f"откликнулось {res.get('alive', 0)}.")
+                socks4 = [f for f in res.get("all", ()) if f.get("kind") == "socks4"]
+                if socks4:
+                    self._logput("    Нашёлся SOCKS4 ("
+                                 + ", ".join(f"{f['host']}:{f['port']}" for f in socks4)
+                                 + "), но Telegram умеет только SOCKS5 и HTTP. "
+                                   "Переключи клиент на SOCKS5.")
                 if res.get("clients"):
                     self._logput("    Запущены: " + ", ".join(res["clients"])
                                  + " — включи в них локальный прокси "
                                    "(SOCKS5 на 127.0.0.1).")
+                elif res.get("configured"):
+                    # Клиент установлен и настроен, но выключен. Раньше об этом
+                    # сказать было нечего: мы знали только про запущенные.
+                    self._logput("    В настройках установленных клиентов "
+                                 "записаны порты: "
+                                 + ", ".join(str(x) for x in res["configured"][:6])
+                                 + ". Похоже, клиент просто не запущен — включи его.")
         except Exception as exc:  # noqa: BLE001
             self._logput(f"[!] Подключение Telegram: {exc}")
         finally:
