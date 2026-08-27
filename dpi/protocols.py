@@ -131,6 +131,33 @@ def find_http_host(payload: bytes) -> Optional[Tuple[int, int, str]]:
 # Самый надёжный обход — «погасить» QUIC Initial, тогда браузер/приложение
 # откатывается на обычный TLS поверх TCP, где работает наша TCP-десинхронизация.
 
+# Discord, определение внешнего адреса (IP Discovery). Первый исходящий
+# пакет голосового соединения: 74 байта, тип 0x0001, длина поля 70, дальше
+# SSRC и место под адрес с портом.
+VOICE_DISCOVERY_LEN = 74
+VOICE_DISCOVERY_MIN = 70
+VOICE_DISCOVERY_MAX = 78
+
+
+def is_voice_discovery(payload: bytes) -> bool:
+    """Тот самый пакет, ради которого и нужен обход голоса.
+
+    Отличать его от остального обязательно. Голосовой поток — это RTP, и
+    вставлять в него подделку нельзя: сервер разбирает каждую датаграмму как
+    часть потока, и мусор посреди разговора рвёт сессию. У RTP версии 2
+    старшие два бита первого байта равны 10, здесь же первые два байта —
+    ноль и единица, так что перепутать нельзя.
+    """
+    if not (VOICE_DISCOVERY_MIN <= len(payload) <= VOICE_DISCOVERY_MAX):
+        return False
+    return payload[0] == 0x00 and payload[1] == 0x01
+
+
+def is_rtp(payload: bytes) -> bool:
+    """Похоже ли на RTP: версия 2 в старших двух битах первого байта."""
+    return bool(payload) and (payload[0] >> 6) == 2
+
+
 def is_quic_long_header(payload: bytes) -> bool:
     """Long-header QUIC-пакет (старший бит первого байта = 1)."""
     if len(payload) < 5:
