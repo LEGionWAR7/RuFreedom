@@ -770,7 +770,7 @@ class Api:
                           "status": text, "best": None, "matrix": []})
         return False
 
-    def run_autotune(self, only=None, by_user=True):
+    def run_autotune(self, only=None, by_user=True, avoid_current=False):
         with self._lock:
             if self.auto["running"] or self.diag_running:
                 return self._auto_refuse("Дождись окончания текущей проверки.")
@@ -810,6 +810,7 @@ class Api:
                             "icon": services.GROUPS[g]["icon"],
                             "state": "wait", "label": ""} for g in targets],
             })
+            self._avoid_current = bool(avoid_current)
             self._auto_thread = threading.Thread(
                 target=self._auto_worker,
                 args=(gen, list(targets), by_user, restore),
@@ -829,12 +830,34 @@ class Api:
             state = voicecheck.report()
         except Exception as exc:                     # noqa: BLE001
             return {"ok": False, "text": f"Проверить не вышло: {exc}"}
+        # Сколько раз движок видел определение адреса голосового сервера.
+        # Это единственный признак, по которому видно, доходит ли до нас
+        # голосовой обмен вообще — или дело не в стратегии, а в том, что
+        # трафик до нас не долетает.
+        eng = self.engine
+        seen = 0
+        try:
+            if eng is not None:
+                seen = int(eng.stats.get("voice_seen", 0))
+        except Exception:                             # noqa: BLE001
+            seen = 0
+        state["seen"] = seen
         self.voice = dict(state)
         if not quiet:
             self._logput("[*] Discord: " + state["text"])
             if state.get("rpc"):
                 self._logput(f"    Клиент отвечает на 127.0.0.1:{state['rpc']} — "
                              f"игры и оверлеи его видят.")
+            if self.state == "running" and services.udp_range("discord"):
+                if seen:
+                    self._logput(f"    Голосовое подключение через обход прошло "
+                                 f"{seen} раз(а) — пакеты до нас доходят.")
+                else:
+                    self._logput("    Голосового подключения обход пока не видел. "
+                                 "Зайди в канал при включённом обходе и посмотри "
+                                 "сюда снова: если строки так и не будет, значит "
+                                 "голосовой трафик до нас не доходит, и дело не "
+                                 "в стратегии.")
         return state
 
     def retune_group(self, gid):
@@ -850,8 +873,13 @@ class Api:
             return self._auto_refuse(
                 f"{services.title(gid)}: соединение не устанавливается вовсе — "
                 f"обходить нечего, нужен прокси или VPN.")
-        self._logput(f"[*] Подбираю заново только для {services.title(gid)}.")
-        return self.run_autotune(only=[gid])
+        if self.s.get("profiles", {}).get(gid):
+            self._logput(f"[*] Подбираю заново для {services.title(gid)} — "
+                         f"прежний выбор в этот раз пропускаю, иначе он снова "
+                         f"победит и ничего не изменится.")
+        else:
+            self._logput(f"[*] Подбираю только для {services.title(gid)}.")
+        return self.run_autotune(only=[gid], avoid_current=True)
 
     def stop_autotune(self):
         """Прервать подбор. Уже подобранное не пропадает."""
@@ -970,7 +998,16 @@ class Api:
         # полный план: сперва проверенные комбинации, затем сетка добора.
         # Без сетки подбор упирался в список и сдавался — а youtubei
         # берётся только ею.
-        combos = autotune.all_candidates(self._known_good())
+        avoid = bool(getattr(self, "_avoid_current", False))
+        if avoid:
+            # Человек нажал «подобрать заново» ИМЕННО потому, что нынешняя
+            # стратегия его не устраивает. Отдать её обратно — издевательство:
+            # она стоит первой в очереди, проходит проверку (по TCP-хостам она
+            # и правда работает) и выигрывает, а проблема остаётся.
+            combos = autotune.all_candidates()
+            combos = [c for c in combos if not self._is_current(c, targets)]
+        else:
+            combos = autotune.all_candidates(self._known_good())
         before = len(combos)
         combos = self._dedupe_plan(combos, sweep.hosts)
         per = scan_timeout + SWEEP_OVERHEAD
@@ -1127,6 +1164,17 @@ class Api:
             # человек прервал сам -- «ничего не пробило» тут было бы враньём:
             # до большей части списка просто не дошли
             self.auto["status"] = "Остановлено"
+        elif avoid:
+            # Прежний выбор мы намеренно исключили и ничего другого не нашли.
+            # Значит он и есть лучшее из доступного — но человек должен
+            # понимать, что это не «подобралось заново», а «замены нет».
+            kept = [g for g in targets if self.s["profiles"].get(g)]
+            self.auto["status"] = "Замены не нашлось — оставил прежнее"
+            self._logput(
+                "[!] Ничего другого не пробило. Прежний выбор оставлен, но он "
+                "уже показал себя не с лучшей стороны — если дело в голосе "
+                "Discord, обход DPI ему может быть просто не по силам: "
+                "смотри «Готов ли голос» в журнале.")
         else:
             kept = [g for g in targets if self.s["profiles"].get(g)]
             if kept:
@@ -1147,7 +1195,11 @@ class Api:
         # Если среди подобранного был Discord — сразу сказать, что с голосом.
         # Иначе человек видит «Discord = такая-то стратегия» и всё равно не
         # знает, заработает ли демонстрация экрана.
-        if "discord" in targets and gen == self._auto_gen:
+        # ...но не после отмены: человек нажал «остановить» и ждёт, что
+        # остановится, а проверка лезет в сеть и держит его ещё несколько
+        # секунд. Отмена должна быть отменой.
+        if ("discord" in targets and gen == self._auto_gen
+                and not self._auto_stop.is_set()):
             self.voice_report()
 
         self.s["auto_tuned"] = True
@@ -1325,6 +1377,28 @@ class Api:
             seen.add(key)
             out.append(combo)
         return out
+
+    def _is_current(self, combo, groups) -> bool:
+        """Совпадает ли комбинация с тем, что уже стоит у этих групп."""
+        try:
+            mine = autotune.candidate_to_profile(combo).to_dict()
+        except Exception:                             # noqa: BLE001
+            return False
+        for gid in groups:
+            body = (self.s.get("profiles") or {}).get(gid)
+            if not body:
+                continue
+            try:
+                theirs = Profile.from_dict(body).to_dict()
+            except Exception:                         # noqa: BLE001
+                continue
+            same = all(mine.get(k) == theirs.get(k) for k in
+                       ("strategy", "split_mode", "fooling", "fake_ttl",
+                        "fake_count", "seg_count", "seqovl", "ip_id_zero",
+                        "fake_sni"))
+            if same:
+                return True
+        return False
 
     def _known_good(self) -> list:
         """Комбинации, которые уже работали на этой машине, — первыми в очередь.

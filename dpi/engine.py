@@ -98,7 +98,11 @@ class Engine:
         self._udp_spans: List[Tuple[int, int, str]] = []
         self._quic_fallback: Optional[Profile] = None
         # статистика за запуск
-        self.stats = {"packets": 0, "bytes": 0, "tcp": 0, "quic": 0,
+        # voice_seen — сколько раз мы видели определение адреса голосового
+        # сервера. Ноль после попытки войти в канал означает, что до нас этот
+        # пакет вообще не дошёл, и дело не в стратегии.
+        self.stats = {"voice_seen": 0,
+                      "packets": 0, "bytes": 0, "tcp": 0, "quic": 0,
                       "started": None}
 
     @property
@@ -237,9 +241,13 @@ class Engine:
             udp_parts.append("(udp.DstPort == 443 and "
                              "udp.Payload[0] >= 0xC0 and udp.Payload[0] <= 0xCF)")
         for lo, hi, _gid in self._udp_spans:
-            # Забираем не весь диапазон, а ТОЛЬКО пакет определения адреса:
-            # 74 байта, первые два — 0x0001. Всё остальное на этих портах —
+            # Забираем не весь диапазон, а только пакет определения адреса:
+            # нужная длина и заведомо не RTP. Всё остальное на этих портах —
             # живой голос и демонстрация экрана, и им у нас делать нечего.
+            #
+            # Условие «не RTP» (0x80..0xBF в первом байте) надёжнее, чем
+            # точный вид заголовка: формат определения адреса менялся, а
+            # признак версии RTP — нет.
             #
             # Раньше через Python шёл весь поток целиком, а подделка уходила
             # в первые два пакета, какими бы они ни были. В пустом канале это
@@ -251,7 +259,7 @@ class Engine:
                 f"(udp.DstPort >= {lo} and udp.DstPort <= {hi}"
                 f" and udp.PayloadLength >= {protocols.VOICE_DISCOVERY_MIN}"
                 f" and udp.PayloadLength <= {protocols.VOICE_DISCOVERY_MAX}"
-                f" and udp.Payload16[0] == 1)")
+                f" and (udp.Payload[0] < 0x80 or udp.Payload[0] > 0xBF))")
 
         if not udp_parts:
             return f"outbound and (ip or ipv6) and {tcp}"
@@ -672,6 +680,7 @@ class Engine:
         ttl = prof.voice_ttl if prof.voice_ttl > 0 else None
         repeats = max(1, min(16, prof.voice_repeats))
         self.stats["quic"] += 1
+        self.stats["voice_seen"] = self.stats.get("voice_seen", 0) + 1
         self._note("voice", f"[+] UDP {key[1]} [{group}] -> подделка перед голосом "
                             f"(x{repeats}"
                             + (f", ttl {ttl}" if ttl else ", свой TTL") + ")")
