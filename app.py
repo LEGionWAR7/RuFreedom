@@ -1833,10 +1833,20 @@ class Api:
         self._logput("[*] Смотрю, нет ли уже запущенного прокси…")
         live: list = []
 
+        def mark_own(item):
+            """Пометить нашу же находку: мост виден в списке как обычный
+            SOCKS5 на 1081, и без подписи его легко принять за чужой клиент."""
+            if (item.get("port") == tgbridge.DEFAULT_PORT
+                    and item.get("host") in ("127.0.0.1", "::1")
+                    and not item.get("broken")):
+                item["own"] = True
+                item["title"] = "Встроенный мост RuFreedom"
+            return item
+
         def progress(done, total, item):
             # Каждая находка видна СРАЗУ. Раньше весь список появлялся одним
             # куском в конце, и до этого момента экран не менялся вовсе.
-            live.append(item)
+            live.append(mark_own(item))
             self.tg_scan = {"best": next((f for f in live if not f.get("broken")), None),
                             "all": list(live), "clients": [],
                             "scanned": total, "alive": total, "running": True}
@@ -1846,6 +1856,8 @@ class Api:
             self._logput(f"[*] Нашёл: {item['title']} — {item['note']}.")
 
         res = tgproxy.scan(stop=self._bridge_stop, progress=progress)
+        for item in res.get("all", ()):
+            mark_own(item)
         self.tg_scan = res
         self.tg_proxy = res.get("best")
         return res
@@ -1961,6 +1973,14 @@ class Api:
         kind = (found.get("kind") or "").upper() or "SOCKS5"
         manual = (f"    Вручную: {kind}, {found['host']}, порт {found['port']} — "
                   f"Настройки → Продвинутые настройки → Тип соединения.")
+        # Самое частое «не работает» — не наша ссылка, а СТАРАЯ запись,
+        # оставшаяся в списке прокси у самого Telegram. Он перебирает их сам и,
+        # наткнувшись на неверную, показывает «прокси настроен неверно» и
+        # выключает прокси — уже настроенный, в том числе наш.
+        self._logput("[*] Если в Telegram уже сохранены другие прокси — удали "
+                     "их: Настройки → Продвинутые настройки → Тип соединения. "
+                     "Он перебирает список сам, и одна неверная запись гасит "
+                     "рабочую.")
         link = tgproxy.link_for(found)
         if not link:
             # Ссылки для HTTP-прокси у Telegram нет вовсе. Отправить его как
