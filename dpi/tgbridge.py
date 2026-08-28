@@ -342,6 +342,9 @@ class TgBridge:
 
     # сколько ждать точку входа, прежде чем признать её мёртвой
     ENTRY_TIMEOUT = 5.0
+    # Сколько держать точку входа в опале после неудачи. Отвалиться она может
+    # на секунду, а вернуться сама — вечная опала здесь только вредит.
+    DEAD_FOR = 60.0
 
     def entries_for(self, dc: int) -> List[dict]:
         """Точки входа в порядке предпочтения: сначала свой дата-центр.
@@ -349,10 +352,18 @@ class TgBridge:
         Порядок важен: точки выключают, и висеть на первой попавшейся нельзя —
         клиент в это время просто ждёт, ничего не понимая.
         """
-        mine = [e for e in self.entries if e.get("dc") == dc and not e.get("dead")]
-        rest = [e for e in self.entries if e.get("dc") != dc and not e.get("dead")]
-        dead = [e for e in self.entries if e.get("dead")]
-        return mine + rest + dead
+        # «Мёртвой» точка считается ВРЕМЕННО. Раньше одна неудача помечала её
+        # навсегда, и после пары случайных сбоев мост оставался вообще без
+        # предпочтений — а точки входа отваливаются и возвращаются постоянно.
+        now = time.monotonic()
+        def dead(e):
+            at = e.get("dead_at")
+            return bool(at and now - at < self.DEAD_FOR)
+
+        mine = [e for e in self.entries if e.get("dc") == dc and not dead(e)]
+        rest = [e for e in self.entries if e.get("dc") != dc and not dead(e)]
+        cold = [e for e in self.entries if dead(e)]
+        return mine + rest + cold
 
     def _open_ws(self, dc: int):
         """Поднять WebSocket через первую живую точку. None — живых нет."""
@@ -360,10 +371,10 @@ class TgBridge:
             try:
                 ws = WsConn.connect(entry["ip"], ws_domain(dc),
                                     timeout=self.ENTRY_TIMEOUT)
-                entry.pop("dead", None)
+                entry.pop("dead_at", None)
                 return ws, entry
             except Exception as exc:  # noqa: BLE001
-                entry["dead"] = True
+                entry["dead_at"] = time.monotonic()
                 self._log(f"[!] Точка входа {entry['ip']} не отвечает ({exc}).")
         return None, None
 

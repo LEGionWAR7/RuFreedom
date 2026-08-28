@@ -1858,16 +1858,54 @@ class Api:
         res = tgproxy.scan(stop=self._bridge_stop, progress=progress)
         for item in res.get("all", ()):
             mark_own(item)
+        # Лучший выбирается ЗАНОВО, уже зная, где наш мост. Внутри поиска этого
+        # знания нет, а разница принципиальная: мост рабочий, но неполный, и
+        # уступает любому настоящему прокси.
+        working = [f for f in res.get("all", ()) if not f.get("broken")]
+        working.sort(key=lambda f: (tgproxy.KIND_ORDER.get("own", 5) if f.get("own")
+                                    else tgproxy.KIND_ORDER.get(f.get("kind"), 9)))
+        res["best"] = working[0] if working else None
         self.tg_scan = res
         self.tg_proxy = res.get("best")
         return res
 
     def _connect_worker(self):
         try:
+            # СНАЧАЛА настоящий прокси, и только потом свой мост. Порядок был
+            # обратным, и это была ошибка.
+            #
+            # Наш мост — не полноценный прокси. Он возит MTProto через
+            # WebSocket дата-центра и умеет ровно это: адреса Telegram и
+            # ничего больше. А Telegram Desktop ждёт обычный SOCKS5 и
+            # открывает через него десятки соединений сразу — особенно когда
+            # переключаешь чат и грузятся картинки. Любое несовпадение он
+            # понимает как «прокси настроен неверно», показывает окно и
+            # выключает прокси.
+            #
+            # Локальный клиент вроде NekoBox или v2rayN такой проблемы не
+            # создаёт: он полный прокси. Поиск его занимает секунды, поэтому
+            # спрашиваем сначала его.
+            res = self._scan_proxies()
+            best = res.get("best")
+            if best and not best.get("own"):
+                self._logput(f"[*] Найден {best['title']} — {best['note']}. "
+                             f"Это полноценный прокси, Telegram с ним работает "
+                             f"без оговорок. Нажми «Настроить Telegram».")
+                return
+            if self._bridge_stop.is_set():
+                self._logput("[*] Поиск остановлен.")
+                return
+
+            self._logput("[*] Готового прокси нет — поднимаю встроенный мост.")
             found = self._find_entries()
             if found:
                 # адреса в журнал не пишем — чтобы их нельзя было вписать руками
                 self._logput(f"[*] Найдено точек входа: {len(found)}. Поднимаю мост.")
+                self._logput("    Учти: мост возит только трафик Telegram. "
+                             "На загрузке картинок и переключении чатов клиент "
+                             "может ругаться, что прокси настроен неверно — это "
+                             "предел самого моста, а не поломка. Надёжнее "
+                             "поставить любой клиент с локальным SOCKS5.")
                 self.bridge_start()
                 return
             if self._bridge_stop.is_set():
@@ -1876,11 +1914,9 @@ class Api:
 
             self._logput("[!] Своих точек входа нет — у провайдера закрыты все "
                          "адреса Telegram.")
-            res = self._scan_proxies()
             if self._bridge_stop.is_set() and not res.get("best"):
                 self._logput("[*] Поиск остановлен.")
                 return
-            best = res.get("best")
             if best:
                 self._logput(f"[*] Найден {best['title']} — {best['note']}. "
                              f"Нажми «Настроить Telegram».")

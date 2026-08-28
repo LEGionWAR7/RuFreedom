@@ -912,7 +912,10 @@ def open_link(link: str) -> Tuple[bool, str]:
 #   mtproto — поднят ровно ради Telegram, добавляется одной ссылкой;
 #   socks5  — Telegram умеет добавлять его ссылкой tg://socks;
 #   http    — ссылки для него НЕ существует, только руками в настройках.
-KIND_ORDER = {"mtproto": 0, "socks5": 1, "http": 2, "socks4": 8}
+# Порядок предпочтения. «own» — наш собственный мост: он рабочий, но
+# неполный (возит только адреса Telegram), поэтому уступает любому
+# настоящему прокси и идёт последним среди годных.
+KIND_ORDER = {"mtproto": 0, "socks5": 1, "http": 2, "own": 5, "socks4": 8}
 
 
 def link_for(found: dict) -> str:

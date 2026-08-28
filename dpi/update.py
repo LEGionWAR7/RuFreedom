@@ -38,7 +38,7 @@ REPO = "RuFreedom"
 # ЕДИНСТВЕННОЕ место, где живёт номер версии. Паспорт exe
 # (version_info.txt) собирается из него при сборке, руками его
 # править не надо -- иначе номера разъедутся.
-VERSION = "1.8.4"
+VERSION = "1.8.5"
 
 API_URL = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
 RELEASES_URL = f"https://github.com/{OWNER}/{REPO}/releases"
