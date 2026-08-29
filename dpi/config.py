@@ -206,6 +206,10 @@ class Config:
     profiles: Dict[str, "Profile"] = field(default_factory=dict)
     # {id группы: (порт_от, порт_до)} — не-QUIC UDP (голос Discord)
     udp_ranges: Dict[str, tuple] = field(default_factory=dict)
+    # Адреса, к которым подключены прокси-клиенты. Их трафик обход не трогает
+    # ни при каких настройках: он уже зашифрован и уже идёт в обход, а
+    # разрезанный ClientHello ломает туннель. Список живой, обновляется на ходу.
+    skip_addrs: set = field(default_factory=set)
 
     def default_profile(self) -> Profile:
         """Профиль из глобальных значений — для групп без своего."""

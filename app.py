@@ -28,7 +28,8 @@ import webview
 
 from dpi import (anticheat, autotune, config as config_mod, diagnose, services,
                  settings_store, tgbridge, tgproxy)
-from dpi import autostart, conflicts, protocols, tempclean, update, voicecheck
+from dpi import (autostart, conflicts, protocols, proxyguard, tempclean,
+                 update, voicecheck)
 from dpi.config import Config, Profile
 from dpi.engine import Engine
 
@@ -748,6 +749,9 @@ class Api:
         # вердикт «ok» и уезжает в «не трогаю» — вместе с голосом. А голос
         # диагностика не проверяет вообще: он ходит по UDP, а не по TLS.
         # Поэтому берём карточки, включённые человеком, до отбора по диагнозу.
+        # Соединения прокси-клиентов помечаем как неприкосновенные.
+        cfg.skip_addrs = self._guarded_addrs(log=True)
+
         cfg.udp_ranges = ({gid: services.udp_range(gid) for gid in cards
                            if services.udp_range(gid)}
                           if self.s["voice_fake"] else {})
@@ -2110,6 +2114,7 @@ class Api:
         while not self._watch_stop.wait(5.0):
             try:
                 self._anticheat_tick()
+                self._guard_tick()
             except Exception as exc:  # noqa: BLE001
                 self._logput(f"[!] Проверка античита: {exc}")
             try:
@@ -2190,6 +2195,35 @@ class Api:
             return True
         except Exception:                            # noqa: BLE001
             return False
+
+    def _guarded_addrs(self, log: bool = False) -> set:
+        """Адреса прокси-клиентов, которые обходу трогать нельзя."""
+        try:
+            addrs = proxyguard.guarded_addrs()
+        except Exception:                             # noqa: BLE001
+            return set()
+        if log and addrs:
+            clients = proxyguard.client_titles()
+            self._logput("[*] " + proxyguard.summary(addrs))
+            if clients:
+                self._logput("    Это соединения: " + ", ".join(clients) + ".")
+        return addrs
+
+    def _guard_tick(self):
+        """Обновить список на ходу: клиент переподключается и меняет адреса."""
+        eng = self.engine
+        if eng is None:
+            return
+        try:
+            fresh = self._guarded_addrs()
+        except Exception:                             # noqa: BLE001
+            return
+        if fresh and fresh != eng.cfg.skip_addrs:
+            new = fresh - set(eng.cfg.skip_addrs)
+            eng.cfg.skip_addrs = fresh
+            if new:
+                self._logput(f"[*] Прокси-клиент поднял соединения к новым "
+                             f"адресам ({len(new)}) — их обход тоже не трогает.")
 
     def _conflict_tick(self):
         """Кто ещё занял драйвер или увёл трафик в туннель."""

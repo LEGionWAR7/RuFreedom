@@ -101,7 +101,7 @@ class Engine:
         # voice_seen — сколько раз мы видели определение адреса голосового
         # сервера. Ноль после попытки войти в канал означает, что до нас этот
         # пакет вообще не дошёл, и дело не в стратегии.
-        self.stats = {"voice_seen": 0,
+        self.stats = {"voice_seen": 0, "guarded": 0,
                       "packets": 0, "bytes": 0, "tcp": 0, "quic": 0,
                       "started": None}
 
@@ -315,6 +315,15 @@ class Engine:
     def _handle(self, pkt) -> None:
         self.stats["packets"] += 1
         self.stats["bytes"] += len(pkt.payload or b"")
+        # Трафик прокси-клиента не трогаем вовсе. Он ходит к своему серверу
+        # тем же TLS на 443 и маскируется под обычный домен — нередко под тот,
+        # что у нас в списке обхода. Разрезав его ClientHello, мы рвём чужой
+        # туннель, а виноватым выглядит прокси: «работает, а через пару секунд
+        # отваливается». Проверка стоит одно обращение к множеству.
+        if self.cfg.skip_addrs and (pkt.dst_addr or "") in self.cfg.skip_addrs:
+            self.stats["guarded"] = self.stats.get("guarded", 0) + 1
+            self._w.send(pkt)
+            return
         if pkt.udp is not None:
             self._handle_udp(pkt)
         else:
